@@ -58,6 +58,8 @@ def main() -> None:
 
     from verl.diagnosis.config import build_argparser, config_from_args
     from verl.diagnosis.data import load_parquet_dataset
+    from verl.diagnosis.metrics import DiagnosisAggregator
+    from verl.diagnosis.mode import NullModeDetector
     from verl.diagnosis.sampler import load_model_and_tokenizer, sample_n
     from verl.diagnosis.verifier import verify_response
     from verl.diagnosis.writer import JsonlWriter
@@ -75,6 +77,9 @@ def main() -> None:
 
     print(f"[mode_diagnosis] loading model: {cfg.model_name}")
     model, tokenizer = load_model_and_tokenizer(cfg.model_name)
+
+    mode_detector = NullModeDetector()
+    agg = DiagnosisAggregator()
 
     out_dir = os.path.dirname(cfg.output_path)
     if out_dir:
@@ -117,23 +122,29 @@ def main() -> None:
             high_verifs: List[Dict[str, Any]] = []
             for t in high_texts:
                 r = verify_response(t, gt)
+                m = mode_detector.assign(ex.prompt, t, extracted_answer=r.extracted, meta=ex.meta)
                 high_verifs.append(
                     {
                         "text": t,
                         "final_answer": r.extracted,
                         "correct": r.correct,
                         "verify_method": r.method,
+                        "mode_id": m.mode_id,
+                        "mode_info": m.info,
                     }
                 )
             low_verifs: List[Dict[str, Any]] = []
             for t in low_texts:
                 r = verify_response(t, gt)
+                m = mode_detector.assign(ex.prompt, t, extracted_answer=r.extracted, meta=ex.meta)
                 low_verifs.append(
                     {
                         "text": t,
                         "final_answer": r.extracted,
                         "correct": r.correct,
                         "verify_method": r.method,
+                        "mode_id": m.mode_id,
+                        "mode_info": m.info,
                     }
                 )
 
@@ -182,9 +193,36 @@ def main() -> None:
                 },
             }
             writer.write(record)
+            agg.update(record)
 
             if (ex.idx + 1) % 10 == 0 or (ex.idx + 1) == len(examples):
                 print(f"[mode_diagnosis] processed {ex.idx + 1}/{len(examples)}")
+
+        # Emit a final summary record for downstream analysis.
+        summary_mode = agg.finalize()
+        summary_record: Dict[str, Any] = {
+            "type": "summary",
+            "config": {
+                "model_name": cfg.model_name,
+                "data_path": cfg.data_path,
+                "high_temp": cfg.high_temp,
+                "low_temp": cfg.low_temp,
+                "high_temp_samples": cfg.high_temp_samples,
+                "low_temp_samples": cfg.low_temp_samples,
+                "max_resp_length": cfg.max_resp_length,
+            },
+            "solved": {
+                "n_eval": n_eval,
+                "high_solved": high_solved,
+                "low_solved": low_solved,
+                "any_solved": any_solved,
+                "high_sample_acc": (high_correct / high_total) if high_total > 0 else None,
+                "low_sample_acc": (low_correct / low_total) if low_total > 0 else None,
+            },
+            "mode_detector": getattr(mode_detector, "name", type(mode_detector).__name__),
+            "mode_metrics": summary_mode,
+        }
+        writer.write(summary_record)
 
     # Summary
     if n_eval == 0:
@@ -201,6 +239,24 @@ def main() -> None:
     print(f"  any  solved         : {any_solved}/{n_eval} ({_pct(any_solved, n_eval):.2f}%)")
     print(f"  high sample acc     : {high_correct}/{high_total} ({_pct(high_correct, high_total):.2f}%)")
     print(f"  low  sample acc     : {low_correct}/{low_total} ({_pct(low_correct, low_total):.2f}%)")
+
+    # Step 3: mode complementarity summary (placeholder with NullModeDetector)
+    try:
+        comp = summary_mode.get("complementarity", {})
+        exist = summary_mode.get("mode_existence", {})
+        print("[mode_diagnosis] mode metrics:")
+        print(f"  acc_union       : {comp.get('acc_union', 0.0):.4f}")
+        print(f"  acc_best_single : {comp.get('acc_best_single', 0.0):.4f} (best={comp.get('best_mode')})")
+        print(f"  gap             : {comp.get('gap', 0.0):.4f}")
+        print(f"  frac multi-modes: {exist.get('frac_multi', 0.0):.4f} ({exist.get('multi_correct_modes', 0)}/{summary_mode.get('n_eval', 0)})")
+
+        jacc = summary_mode.get("jaccard", [])
+        if jacc:
+            print("  lowest jaccard pairs (top 5):")
+            for d in jacc[:5]:
+                print(f"    {d['mode_a']} vs {d['mode_b']}: jac={d['jaccard']:.3f} (|∩|={d['intersection']}, |∪|={d['union']})")
+    except Exception as e:
+        print(f"[mode_diagnosis] warning: failed to print mode metrics: {e}")
 
 
 if __name__ == "__main__":

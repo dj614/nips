@@ -21,6 +21,9 @@ multi-sample generation + downstream analysis.
 
 from .config import DiagnosisConfig, build_argparser
 from .data import load_parquet_dataset
+from .metrics import DiagnosisAggregator
+from .mode import ModeAssignResult, ModeDetector, NullModeDetector
+from .perturb import NullPerturber, Perturber
 from .sampler import load_model_and_tokenizer, sample_n
 from .verifier import extract_final_answer, exact_match, verify_response
 from .writer import JsonlWriter
@@ -35,4 +38,10 @@ __all__ = [
     "exact_match",
     "verify_response",
     "JsonlWriter",
+    "ModeAssignResult",
+    "ModeDetector",
+    "NullModeDetector",
+    "Perturber",
+    "NullPerturber",
+    "DiagnosisAggregator",
 ]

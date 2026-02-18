@@ -64,25 +64,58 @@ def _normalize_hints(obj: Any) -> List[str]:
     if hasattr(obj, "tolist") and callable(obj.tolist):
         obj = obj.tolist()
 
-    # Common cases: list/tuple/set
-    if isinstance(obj, (list, tuple, set)):
-        hints = [str(x) for x in obj if x is not None]
-        return [h for h in hints if h.strip()]
+    hints: List[str] = []
 
-    # Sometimes stored as {"hint": ..., "...": ...} or {"hints": [...]}
-    if isinstance(obj, dict):
-        if "hints" in obj:
-            return _normalize_hints(obj.get("hints"))
-        # Interpret dict keys as hint strings (stable ordering).
-        hints = [str(k) for k in obj.keys() if k is not None]
-        hints = [h for h in hints if h.strip()]
-        return sorted(hints)
+    def _add(v: Any) -> None:
+        """Recursively add hint strings from nested containers."""
+        if v is None:
+            return
+        if hasattr(v, "tolist") and callable(v.tolist):
+            v = v.tolist()
 
-    # Fallback: a single hint string.
-    if isinstance(obj, str):
-        s = obj.strip()
-        return [s] if s else []
-    return []
+        # String -> single hint.
+        if isinstance(v, str):
+            s = v.strip()
+            if s:
+                hints.append(s)
+            return
+
+        # Dict forms:
+        #   - {"hint": "...", "solution": "..."}
+        #   - {"hints": [...]} or {"modes": [{"hint": ...}, ...]}
+        if isinstance(v, dict):
+            if "hint" in v:
+                _add(v.get("hint"))
+                return
+            if "hints" in v:
+                _add(v.get("hints"))
+                return
+            if "modes" in v:
+                _add(v.get("modes"))
+                return
+
+            # Backward-compatible fallback: interpret dict keys as hints.
+            for k in sorted(v.keys(), key=lambda x: str(x)):
+                _add(str(k))
+            return
+
+        # Sequence container.
+        if isinstance(v, (list, tuple, set)):
+            seq = list(v)
+            # Keep sets deterministic.
+            if isinstance(v, set):
+                seq = sorted(seq, key=lambda x: str(x))
+            for item in seq:
+                _add(item)
+            return
+
+        # Fallback: stringify scalars.
+        s = str(v).strip()
+        if s:
+            hints.append(s)
+
+    _add(obj)
+    return [h for h in hints if h.strip()]
 
 
 def load_parquet_dataset(path: str) -> List[DiagnosisExample]:

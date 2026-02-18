@@ -50,6 +50,7 @@ python scripts/run_mode_diagnosis.py \
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -66,26 +67,36 @@ def _is_solved(verifs: List[Dict[str, Any]]) -> Optional[bool]:
 
 
 def _derive_model_tags(model_names: Sequence[str], model_tags: Sequence[str]) -> List[str]:
+    from verl.diagnosis.model_spec import sanitize_tag
+
     if model_tags and len(model_tags) == len(model_names):
-        return list(model_tags)
+        return [sanitize_tag(t) for t in list(model_tags)]
     # Stable default: use basename of local path or repo id tail.
     out: List[str] = []
     for m in model_names:
         s = str(m).rstrip("/")
-        out.append(os.path.basename(s) or s.split("/")[-1])
+        out.append(sanitize_tag(os.path.basename(s) or s.split("/")[-1]))
     return out
 
 
 def _output_path_for_tag(output_path: str, tag: str, multi: bool) -> str:
+    from verl.diagnosis.model_spec import sanitize_tag
     if not multi:
         return output_path
     root, ext = os.path.splitext(output_path)
     if not ext:
         ext = ".jsonl"
-    return f"{root}.{tag}{ext}"
+    return f"{root}.{sanitize_tag(tag)}{ext}"
 
 
-def _run_one_model(model_name_or_path: str, model_tag: str, cfg, examples) -> Tuple[str, Dict[str, Any]]:
+def _run_one_model(
+    model_name_or_path: str,
+    model_tag: str,
+    cfg,
+    examples,
+    *,
+    model_meta: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, Dict[str, Any]]:
     """Run sampling for a single model and write a jsonl output."""
     from verl.diagnosis.metrics import DiagnosisAggregator
     from verl.diagnosis.mode import NullModeDetector
@@ -253,6 +264,7 @@ def _run_one_model(model_name_or_path: str, model_tag: str, cfg, examples) -> Tu
                 "idx": ex.idx,
                 "model_tag": model_tag,
                 "model_name_or_path": model_name_or_path,
+                "model_meta": model_meta or {},
                 "prompt": ex.prompt,
                 "ground_truth": gt,
                 "meta": ex.meta,
@@ -294,6 +306,7 @@ def _run_one_model(model_name_or_path: str, model_tag: str, cfg, examples) -> Tu
             "config": {
                 "model_tag": model_tag,
                 "model_name_or_path": model_name_or_path,
+                "model_meta": model_meta or {},
                 "data_path": cfg.data_path,
                 "high_temp": cfg.high_temp,
                 "low_temp": cfg.low_temp,
@@ -360,8 +373,19 @@ def main() -> None:
     examples = load_parquet_dataset(cfg.data_path)
     print(f"[mode_diagnosis] #examples: {len(examples)}")
 
-    model_names = cfg.model_names if cfg.model_names else [cfg.model_name]
-    model_tags = _derive_model_tags(model_names, cfg.model_tags)
+    # Resolve models (single/multi) from either a models file or CLI flags.
+    model_meta: List[Dict[str, Any]] = []
+    if getattr(cfg, "models_file", None):
+        from verl.diagnosis.model_spec import load_models_file, sanitize_tag
+
+        specs = load_models_file(cfg.models_file)
+        model_names = [sp.path for sp in specs]
+        model_tags = [sanitize_tag(sp.tag) for sp in specs]
+        model_meta = [dict(sp.meta or {}) for sp in specs]
+    else:
+        model_names = cfg.model_names if cfg.model_names else [cfg.model_name]
+        model_tags = _derive_model_tags(model_names, cfg.model_tags)
+        model_meta = [{} for _ in model_names]
 
     multi = len(model_names) > 1
     out_dir = os.path.dirname(cfg.output_path)
@@ -370,12 +394,54 @@ def main() -> None:
 
     # Run each model into its own jsonl file for clean downstream comparisons.
     summaries: List[Dict[str, Any]] = []
-    for model_name_or_path, model_tag in zip(model_names, model_tags):
+    for model_name_or_path, model_tag, meta in zip(model_names, model_tags, model_meta):
         cfg_one = cfg
         # Rebind the output path per model when in multi-model mode.
         cfg_one = type(cfg)(**{**cfg.__dict__, "output_path": _output_path_for_tag(cfg.output_path, model_tag, multi)})
-        out_path, summary = _run_one_model(model_name_or_path, model_tag, cfg_one, examples)
-        summaries.append({"tag": model_tag, "output_path": out_path, "summary": summary})
+        out_path, summary = _run_one_model(model_name_or_path, model_tag, cfg_one, examples, model_meta=meta)
+        summaries.append({"tag": model_tag, "output_path": out_path, "model_name_or_path": model_name_or_path, "model_meta": meta, "summary": summary})
+
+    # Write a small manifest for downstream summarization.
+    try:
+        root, ext = os.path.splitext(cfg.output_path)
+        if not ext:
+            root = cfg.output_path
+        manifest_path = f"{root}.manifest.json"
+        payload = {
+            "type": "mode_diagnosis_manifest",
+            "version": 1,
+            "data_path": cfg.data_path,
+            "output_root": cfg.output_path,
+            "run_config": {
+                "high_temp": cfg.high_temp,
+                "low_temp": cfg.low_temp,
+                "mid_temp": cfg.mid_temp,
+                "high_temp_samples": cfg.high_temp_samples,
+                "low_temp_samples": cfg.low_temp_samples,
+                "mid_temp_samples_per_hint": cfg.mid_temp_samples_per_hint,
+                "top_p": cfg.top_p,
+                "repetition_penalty": cfg.repetition_penalty,
+                "max_resp_length": cfg.max_resp_length,
+                "answer_extract": cfg.answer_extract,
+                "boxed_cmd": cfg.boxed_cmd,
+                "hint_template": cfg.hint_template,
+                "hint_injection": cfg.hint_injection,
+            },
+            "models": [
+                {
+                    "tag": s.get("tag"),
+                    "model_name_or_path": s.get("model_name_or_path"),
+                    "model_meta": s.get("model_meta") or {},
+                    "output_jsonl": s.get("output_path"),
+                }
+                for s in summaries
+            ],
+        }
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        print(f"[mode_diagnosis] wrote manifest: {manifest_path}")
+    except Exception as e:
+        print(f"[mode_diagnosis] WARN: failed to write manifest: {e}")
 
     # If multiple models, print a short side-by-side comparison of reach/nat solved.
     if summaries:

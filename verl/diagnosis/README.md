@@ -65,11 +65,58 @@ python scripts/run_mode_diagnosis.py \
 ```
 
 ### 2.3 控制采样强度
+
 ```bash
 python scripts/run_mode_diagnosis.py \
   --high_temp 1.1 --high_temp_samples 64 \
   --low_temp 0.3 --low_temp_samples 16 \
   --max_resp_length 4096
+```
+
+
+### 2.4 多模型对比（推荐：models_file）
+如果你需要同时对比 **base + 多种 RL 变体**（grpo、gspo、drgrpo、dapo 等），
+推荐用一个 YAML/JSON 文件描述模型列表，避免脚本里写死“base/grpo”。
+
+示例 `models.yaml`：
+
+```yaml
+models:
+  - tag: base
+    path: Qwen/Qwen3-8B
+  - tag: grpo
+    path: /path/to/grpo/ckpt
+    meta:
+      algo: grpo
+      step: 2000
+  - tag: gspo
+    path: /path/to/gspo/ckpt
+    meta:
+      algo: gspo
+      step: 2000
+```
+
+运行：
+
+```bash
+python scripts/run_mode_diagnosis.py \
+  --models_file models.yaml \
+  --data_path /path/to/dataset.parquet \
+  --output_path outputs/diagnosis.jsonl
+```
+
+在 multi-model 模式下，脚本会分别写出：
+- `outputs/diagnosis.<tag>.jsonl`
+- 以及一个 `outputs/diagnosis.manifest.json`（供 step-2 汇总使用）
+
+Step-2 汇总（推荐用 manifest）：
+
+```bash
+python scripts/summarize_modebank_diagnosis.py \
+  --manifest outputs/diagnosis.manifest.json \
+  --baseline_tag base \
+  --group_by ability \
+  --save_json outputs/modebank_summary.json
 ```
 
 ---

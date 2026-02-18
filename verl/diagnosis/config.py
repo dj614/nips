@@ -41,6 +41,10 @@ class DiagnosisConfig:
     # Optional: human-readable tags aligned with `model_names`.
     model_tags: List[str] = field(default_factory=list)
 
+    # Optional: load model specs from a YAML/JSON file. If provided, this overrides
+    # --model_name/--model_names/--model_tags.
+    models_file: Optional[str] = None
+
     # (2) parquet path (local)
     data_path: str = "dapo_math_17k.parquet"
 
@@ -96,6 +100,15 @@ def build_argparser() -> argparse.ArgumentParser:
         default=None,
         help="Optional: tags aligned with --model_names (e.g., base grpo).",
     )
+    p.add_argument(
+        "--models_file",
+        type=str,
+        default=None,
+        help=(
+            "Optional: YAML/JSON file specifying a list of models to compare. "
+            "If provided, overrides --model_name/--model_names/--model_tags."
+        ),
+    )
     p.add_argument("--data_path", type=str, default=DiagnosisConfig.data_path)
     p.add_argument("--high_temp", type=float, default=DiagnosisConfig.high_temp)
     p.add_argument("--low_temp", type=float, default=DiagnosisConfig.low_temp)
@@ -141,6 +154,7 @@ def config_from_args(args: argparse.Namespace) -> DiagnosisConfig:
         model_name=args.model_name,
         model_names=model_names,
         model_tags=model_tags,
+        models_file=getattr(args, "models_file", None),
         data_path=args.data_path,
         high_temp=args.high_temp,
         low_temp=args.low_temp,

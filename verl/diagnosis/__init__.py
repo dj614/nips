@@ -22,6 +22,8 @@ multi-sample generation + downstream analysis.
 from .config import DiagnosisConfig, build_argparser
 from .data import load_parquet_dataset
 from .sampler import load_model_and_tokenizer, sample_n
+from .verifier import extract_final_answer, exact_match, verify_response
+from .writer import JsonlWriter
 
 __all__ = [
     "DiagnosisConfig",
@@ -29,4 +31,8 @@ __all__ = [
     "load_parquet_dataset",
     "load_model_and_tokenizer",
     "sample_n",
+    "extract_final_answer",
+    "exact_match",
+    "verify_response",
+    "JsonlWriter",
 ]

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Offline sampler for multi-mode diagnosis (Step 1).
+"""Offline sampler for multi-mode diagnosis (Step 2).
 
 This script:
   1) Loads a parquet dataset containing chat-style prompts.
@@ -20,10 +20,10 @@ This script:
   3) For each prompt, samples responses with:
        - high temperature (diverse)
        - low temperature (stable)
-  4) Dumps raw generations to a jsonl file (one record per prompt).
-
-It intentionally does NOT do correctness verification or mode clustering yet.
-Those will be implemented in later steps.
+  4) Extracts final answers and verifies correctness using exact-match with
+     `reward_model.ground_truth`.
+  5) Streams results to a jsonl file (one record per prompt), and prints a
+     small summary to terminal.
 
 Example:
 
@@ -38,22 +38,29 @@ Example:
 
 from __future__ import annotations
 
-import json
 import os
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 
-def _write_jsonl(fp, record: Dict[str, Any]) -> None:
-    fp.write(json.dumps(record, ensure_ascii=False) + "\n")
+def _is_solved(verifs: List[Dict[str, Any]]) -> Optional[bool]:
+    """Return True if any sample is correct.
+
+    If all samples are missing ground truth (correct=None), return None.
+    """
+    any_gt = any(v.get("correct") is not None for v in verifs)
+    if not any_gt:
+        return None
+    return any(v.get("correct") is True for v in verifs)
 
 
 def main() -> None:
-    # Make local `verl/` importable when running from repo root.
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
 
     from verl.diagnosis.config import build_argparser, config_from_args
     from verl.diagnosis.data import load_parquet_dataset
     from verl.diagnosis.sampler import load_model_and_tokenizer, sample_n
+    from verl.diagnosis.verifier import verify_response
+    from verl.diagnosis.writer import JsonlWriter
 
     parser = build_argparser()
     args = parser.parse_args()
@@ -73,10 +80,24 @@ def main() -> None:
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
-    print(f"[mode_diagnosis] writing generations -> {cfg.output_path}")
-    with open(cfg.output_path, "w", encoding="utf-8") as f:
+    n_eval = 0
+    high_solved = 0
+    low_solved = 0
+    any_solved = 0
+
+    high_total = 0
+    low_total = 0
+    high_correct = 0
+    low_correct = 0
+
+    print(f"[mode_diagnosis] writing diagnosis -> {cfg.output_path}")
+    with JsonlWriter(cfg.output_path) as writer:
         for ex in examples:
-            high_responses = sample_n(
+            gt = ex.ground_truth
+            if gt is not None:
+                n_eval += 1
+
+            high_texts = sample_n(
                 model,
                 tokenizer,
                 ex.prompt,
@@ -84,7 +105,7 @@ def main() -> None:
                 n=cfg.high_temp_samples,
                 max_new_tokens=cfg.max_resp_length,
             )
-            low_responses = sample_n(
+            low_texts = sample_n(
                 model,
                 tokenizer,
                 ex.prompt,
@@ -93,32 +114,93 @@ def main() -> None:
                 max_new_tokens=cfg.max_resp_length,
             )
 
+            high_verifs: List[Dict[str, Any]] = []
+            for t in high_texts:
+                r = verify_response(t, gt)
+                high_verifs.append(
+                    {
+                        "text": t,
+                        "final_answer": r.extracted,
+                        "correct": r.correct,
+                        "verify_method": r.method,
+                    }
+                )
+            low_verifs: List[Dict[str, Any]] = []
+            for t in low_texts:
+                r = verify_response(t, gt)
+                low_verifs.append(
+                    {
+                        "text": t,
+                        "final_answer": r.extracted,
+                        "correct": r.correct,
+                        "verify_method": r.method,
+                    }
+                )
+
+            high_solved_flag = _is_solved(high_verifs)
+            low_solved_flag = _is_solved(low_verifs)
+            any_solved_flag: Optional[bool]
+            if high_solved_flag is None and low_solved_flag is None:
+                any_solved_flag = None
+            else:
+                any_solved_flag = bool(high_solved_flag) or bool(low_solved_flag)
+
+            if gt is not None:
+                if high_solved_flag:
+                    high_solved += 1
+                if low_solved_flag:
+                    low_solved += 1
+                if any_solved_flag:
+                    any_solved += 1
+
+                # sample-level accuracy
+                high_total += len(high_verifs)
+                low_total += len(low_verifs)
+                high_correct += sum(1 for v in high_verifs if v.get("correct") is True)
+                low_correct += sum(1 for v in low_verifs if v.get("correct") is True)
+
             record: Dict[str, Any] = {
                 "type": "sample",
                 "idx": ex.idx,
                 "prompt": ex.prompt,
-                "ground_truth": ex.ground_truth,
+                "ground_truth": gt,
                 "meta": ex.meta,
                 "samples": {
                     "high_temp": {
                         "temperature": cfg.high_temp,
                         "n": cfg.high_temp_samples,
-                        "responses": high_responses,
+                        "solved": high_solved_flag,
+                        "responses": high_verifs,
                     },
                     "low_temp": {
                         "temperature": cfg.low_temp,
                         "n": cfg.low_temp_samples,
-                        "responses": low_responses,
+                        "solved": low_solved_flag,
+                        "responses": low_verifs,
                     },
+                    "any_solved": any_solved_flag,
                 },
             }
-            _write_jsonl(f, record)
+            writer.write(record)
 
-            # lightweight progress log
             if (ex.idx + 1) % 10 == 0 or (ex.idx + 1) == len(examples):
                 print(f"[mode_diagnosis] processed {ex.idx + 1}/{len(examples)}")
 
-    print("[mode_diagnosis] done")
+    # Summary
+    if n_eval == 0:
+        print("[mode_diagnosis] done (no ground_truth available, skipped summary)")
+        return
+
+    def _pct(a: int, b: int) -> float:
+        return (100.0 * a / b) if b > 0 else 0.0
+
+    print("[mode_diagnosis] summary:")
+    print(f"  #eval questions     : {n_eval}")
+    print(f"  high solved@{cfg.high_temp_samples}: {high_solved}/{n_eval} ({_pct(high_solved, n_eval):.2f}%)")
+    print(f"  low  solved@{cfg.low_temp_samples}: {low_solved}/{n_eval} ({_pct(low_solved, n_eval):.2f}%)")
+    print(f"  any  solved         : {any_solved}/{n_eval} ({_pct(any_solved, n_eval):.2f}%)")
+    print(f"  high sample acc     : {high_correct}/{high_total} ({_pct(high_correct, high_total):.2f}%)")
+    print(f"  low  sample acc     : {low_correct}/{low_total} ({_pct(low_correct, low_total):.2f}%)")
 
 
 if __name__ == "__main__":

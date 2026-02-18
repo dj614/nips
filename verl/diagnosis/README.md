@@ -236,3 +236,36 @@ python scripts/run_mode_diagnosis.py \
 ---
 
 如果你想我继续：我可以把 **mode 判别（关键词特征 + HDBSCAN/KMeans）** 的第一版也按同样“最小侵入”方式加进去，并确保输出 schema 不破坏当前格式。
+
+---
+
+## 4. Step2：ModeBank 指标汇总（entropy / coverage / reach complementarity）
+
+如果你的 parquet 里还额外包含字段：
+
+- `mode`: `list[str]`（每道题的一组 hint，例如 `"use Markov inequality"`）
+
+那么 Step1 会对每个 hint 做中温采样并记录 `reach.per_hint[*].solved`。
+
+当你分别对 **base model** 与 **GRPO model** 跑完 Step1（会得到两个 jsonl）后，
+可以使用下面脚本计算 Step2 指标并打印对比：
+
+```bash
+python scripts/summarize_modebank_diagnosis.py \
+  --base_jsonl outputs/diagnosis.base.jsonl \
+  --grpo_jsonl outputs/diagnosis.grpo.jsonl
+```
+
+可选：按 `meta` 里的字段分组（例如 `ability` / `problem_type`）：
+
+```bash
+python scripts/summarize_modebank_diagnosis.py \
+  --base_jsonl outputs/diagnosis.base.jsonl \
+  --grpo_jsonl outputs/diagnosis.grpo.jsonl \
+  --group_by ability
+```
+
+脚本会输出：
+- NAT mode entropy（由自然采样文本按 hint-keyword overlap 的基线规则标注后计算）
+- NAT coverage vs REACH（|M_nat(x)| / |M_reach(x)|）
+- REACH complementarity（Acc(union) vs Acc(best)）

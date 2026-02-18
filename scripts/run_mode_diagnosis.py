@@ -28,13 +28,24 @@ This script:
 
 Example:
 
-  python scripts/run_mode_diagnosis.py \
-    --model_name Qwen/Qwen3-8B \
-    --data_path dapo_math_17k.parquet \
-    --high_temp 1.0 --high_temp_samples 32 \
-    --low_temp 0.2 --low_temp_samples 8 \
-    --max_resp_length 4096 \
-    --output_path diagnosis.jsonl
+python scripts/run_mode_diagnosis.py \
+  --model_name Qwen/Qwen3-8B \
+  --data_path dapo_math_17k.parquet \
+  --high_temp 1.0 --high_temp_samples 32 \
+  --low_temp 0.2 --low_temp_samples 8 \
+  --max_resp_length 4096 \
+  --output_path diagnosis.jsonl
+
+python scripts/run_mode_diagnosis.py \
+  --model_names /path/to/base /path/to/grpo \
+  --model_tags base grpo \
+  --data_path your_dataset.parquet \
+  --output_path outputs/diagnosis.jsonl \
+  --answer_extract boxed --boxed_cmd "\boxed" \
+  --high_temp 1.0 --high_temp_samples 32 \
+  --low_temp 0.2 --low_temp_samples 8 \
+  --mid_temp 0.6 --mid_temp_samples_per_hint 4
+
 """
 
 from __future__ import annotations

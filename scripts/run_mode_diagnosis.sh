@@ -65,11 +65,18 @@ if [[ -z "$MODELS_FILE" ]]; then
   CHECKPOINT_DIR="/primus_oss_root/repository/quark_sft/${JOB_ID}/save_checkpoint"
   CHECKPOINT_PATH="${CHECKPOINT_DIR}/global_step_${STEP}/actor/huggingface"
 
+  # Prefer a local base checkpoint (Primus env) when available; otherwise fall back
+  # to the public HF repo id.
+  BASE_PATH="Qwen/Qwen3-8B"
+  if [[ -n "${PRIMUS_SOURCE_CHECKPOINT_DIR:-}" ]]; then
+    BASE_PATH="${PRIMUS_SOURCE_CHECKPOINT_DIR}/Qwen3-8B"
+  fi
+
   TMP_MODELS_FILE=$(mktemp /tmp/mode_diagnosis_models.XXXX.yaml)
   cat > "$TMP_MODELS_FILE" <<EOF_MODELS
 models:
   - tag: base
-    path: Qwen/Qwen3-8B
+    path: ${BASE_PATH}
   - tag: grpo
     path: ${CHECKPOINT_PATH}
 EOF_MODELS

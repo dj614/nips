@@ -9,6 +9,15 @@ from typing import Any, Dict, Iterable, Optional
 
 from verl.diagnosis.modebank_metrics import ModeBankEvaluator, load_jsonl
 
+"""
+Example:
+
+python scripts/summarize_modebank_diagnosis.py \
+  --base_jsonl outputs/diagnosis.base.jsonl \
+  --grpo_jsonl outputs/diagnosis.grpo.jsonl \
+  --save_json outputs/modebank_summary.json
+  --group_by ability
+"""
 
 def _get_group_key(record: Dict[str, Any], group_by: Optional[str]) -> str:
     if not group_by:

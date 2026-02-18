@@ -41,35 +41,126 @@ def _normalize(s: str) -> str:
     return s.strip().replace(",", "")
 
 
-def extract_final_answer(text: str) -> Optional[str]:
-    """Extract a final answer string from a model response.
-
-    Strategy:
-      1) GSM8K strict: look for "#### <number>".
-      2) GSM8K flexible: last valid number in the tail.
-      3) Fallback: None.
-
-    Notes:
-      - We clip internally in the gsm8k extractor to avoid regex slowdowns on long outputs.
-    """
+def _extract_gsm8k(text: str) -> Optional[str]:
+    """GSM8K-style extraction: "#### ..." with a numeric fallback."""
     try:
         from verl.utils.reward_score.gsm8k import extract_solution
 
         ans = extract_solution(solution_str=text, method="strict")
         if ans is not None:
             return ans
-        ans = extract_solution(solution_str=text, method="flexible")
-        return ans
+        return extract_solution(solution_str=text, method="flexible")
     except Exception:
-        # If reward_score utils are not available for some reason, fail gracefully.
         return None
+
+
+def _extract_hash_mark(text: str) -> Optional[str]:
+    """Extract answer after the last "####" marker."""
+    if "####" not in text:
+        return None
+    tail = text.split("####")[-1]
+    # Take the first non-empty line.
+    for line in tail.splitlines():
+        s = line.strip()
+        if s:
+            return s
+    s = tail.strip()
+    return s if s else None
+
+
+def _last_braced_expression(text: str, key: str) -> Optional[str]:
+    """Return the last braced expression starting with `key`, e.g. "\\boxed{".
+
+    Returns the full substring `key...}` including braces.
+    """
+    idx = text.rfind(key)
+    if idx < 0:
+        return None
+
+    i = idx
+    right_brace_idx = None
+    num_left_braces_open = 0
+    while i < len(text):
+        if text[i] == "{":
+            num_left_braces_open += 1
+        elif text[i] == "}":
+            num_left_braces_open -= 1
+            if num_left_braces_open == 0:
+                right_brace_idx = i
+                break
+        i += 1
+
+    if right_brace_idx is None:
+        return None
+    return text[idx : right_brace_idx + 1]
+
+
+def _extract_boxed(text: str, boxed_cmd: str = "\\boxed") -> Optional[str]:
+    """Extract the content inside the last \boxed{...} (or other boxed_cmd)."""
+    boxed_cmd = str(boxed_cmd).strip()
+    if not boxed_cmd:
+        boxed_cmd = "\\boxed"
+    if not boxed_cmd.startswith("\\"):
+        boxed_cmd = "\\" + boxed_cmd
+
+    key = boxed_cmd + "{"
+    s = _last_braced_expression(text, key)
+    if s is None:
+        return None
+
+    # Strip the prefix and trailing brace.
+    if not s.startswith(key) or not s.endswith("}"):
+        return None
+    return s[len(key) : -1].strip()
+
+
+def extract_final_answer(text: str, method: str = "gsm8k", boxed_cmd: str = "\\boxed") -> Optional[str]:
+    """Extract a final answer string from a model response.
+
+    Supported methods:
+      - gsm8k: "####"-style GSM8K extraction
+      - boxed: last \boxed{...}
+      - hash_mark: last "#### ..." line
+      - boxed_or_hash_mark: prefer boxed, else hash_mark, else gsm8k
+    """
+    method = str(method or "gsm8k").strip().lower()
+
+    if method == "boxed":
+        return _extract_boxed(text, boxed_cmd=boxed_cmd)
+    if method == "hash_mark":
+        return _extract_hash_mark(text)
+    if method == "boxed_or_hash_mark":
+        ans = _extract_boxed(text, boxed_cmd=boxed_cmd)
+        if ans is not None:
+            return ans
+        ans = _extract_hash_mark(text)
+        if ans is not None:
+            return ans
+        return _extract_gsm8k(text)
+    if method == "gsm8k":
+        return _extract_gsm8k(text)
+
+    # Fallback: try something reasonable.
+    ans = _extract_boxed(text, boxed_cmd=boxed_cmd)
+    if ans is not None:
+        return ans
+    ans = _extract_hash_mark(text)
+    if ans is not None:
+        return ans
+    return _extract_gsm8k(text)
 
 
 def exact_match(pred: str, gt: str) -> bool:
     return _normalize(pred) == _normalize(gt)
 
 
-def verify_response(response_text: str, ground_truth: Optional[str]) -> VerifyResult:
+def verify_response(
+    response_text: str,
+    ground_truth: Optional[str],
+    *,
+    extract_method: str = "gsm8k",
+    boxed_cmd: str = "\\boxed",
+) -> VerifyResult:
     """Verify a single response against the ground truth.
 
     Returns:
@@ -77,7 +168,7 @@ def verify_response(response_text: str, ground_truth: Optional[str]) -> VerifyRe
 
     If ground_truth is None, correct will be None.
     """
-    extracted = extract_final_answer(response_text)
+    extracted = extract_final_answer(response_text, method=extract_method, boxed_cmd=boxed_cmd)
     if ground_truth is None:
         return VerifyResult(extracted=extracted, correct=None, method="no_gt")
 

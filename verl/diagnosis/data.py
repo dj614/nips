@@ -37,6 +37,10 @@ class DiagnosisExample:
     idx: int
     prompt: List[Dict[str, Any]]
     ground_truth: Optional[str]
+    # Optional per-problem reachable mode hints (from dataset column `mode`).
+    # This is used for reachability probing: append each hint to the prompt and
+    # test exact-match success.
+    hints: List[str]
     meta: Dict[str, Any]
 
 
@@ -47,6 +51,38 @@ def _normalize_prompt(obj: Any) -> List[Dict[str, Any]]:
     if not isinstance(obj, list):
         raise TypeError(f"prompt must be a list of messages, got: {type(obj)}")
     return obj
+
+
+def _normalize_hints(obj: Any) -> List[str]:
+    """Normalize a `mode` / `hints` column into a list[str].
+
+    The dataset may store python objects as numpy arrays or as dict/set-like
+    containers. We keep this robust and deterministic.
+    """
+    if obj is None:
+        return []
+    if hasattr(obj, "tolist") and callable(obj.tolist):
+        obj = obj.tolist()
+
+    # Common cases: list/tuple/set
+    if isinstance(obj, (list, tuple, set)):
+        hints = [str(x) for x in obj if x is not None]
+        return [h for h in hints if h.strip()]
+
+    # Sometimes stored as {"hint": ..., "...": ...} or {"hints": [...]}
+    if isinstance(obj, dict):
+        if "hints" in obj:
+            return _normalize_hints(obj.get("hints"))
+        # Interpret dict keys as hint strings (stable ordering).
+        hints = [str(k) for k in obj.keys() if k is not None]
+        hints = [h for h in hints if h.strip()]
+        return sorted(hints)
+
+    # Fallback: a single hint string.
+    if isinstance(obj, str):
+        s = obj.strip()
+        return [s] if s else []
+    return []
 
 
 def load_parquet_dataset(path: str) -> List[DiagnosisExample]:
@@ -60,6 +96,9 @@ def load_parquet_dataset(path: str) -> List[DiagnosisExample]:
     examples: List[DiagnosisExample] = []
     for i, row in enumerate(df.to_dict(orient="records")):
         prompt = _normalize_prompt(row.get("prompt"))
+
+        # Optional: per-problem reachable mode hints.
+        hints = _normalize_hints(row.get("mode"))
 
         rm = row.get("reward_model")
         gt: Optional[str] = None
@@ -78,5 +117,5 @@ def load_parquet_dataset(path: str) -> List[DiagnosisExample]:
         raw.pop("prompt", None)
         meta["raw"] = raw
 
-        examples.append(DiagnosisExample(idx=i, prompt=prompt, ground_truth=gt, meta=meta))
+        examples.append(DiagnosisExample(idx=i, prompt=prompt, ground_truth=gt, hints=hints, meta=meta))
     return examples

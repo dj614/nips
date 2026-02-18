@@ -38,6 +38,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import pandas as pd
 import requests
 
+from verl.diagnosis.verifier import exact_match, extract_final_answer
+
 
 # -------------------------
 # Prompt template
@@ -262,6 +264,95 @@ def _hints_from_modes(obj: Any) -> List[str]:
     return out
 
 
+def _ground_truth_from_row(df: "pd.DataFrame", i: int) -> Optional[str]:
+    """Fetch reward_model.ground_truth from a dataframe row (robust to struct/flattened columns)."""
+    # Common flattened column name.
+    for key in ("reward_model.ground_truth", "ground_truth", "answer", "gt"):
+        if key in df.columns:
+            v = df.at[i, key]
+            if v is None:
+                continue
+            try:
+                if isinstance(v, float) and (v != v):  # NaN
+                    continue
+            except Exception:
+                pass
+            s = str(v).strip()
+            if s:
+                return s
+
+    # Common nested struct column: reward_model is dict-like.
+    if "reward_model" in df.columns:
+        rm = df.at[i, "reward_model"]
+        if hasattr(rm, "tolist") and callable(rm.tolist):
+            rm = rm.tolist()
+        if isinstance(rm, dict):
+            v = rm.get("ground_truth")
+            if v is not None:
+                s = str(v).strip()
+                return s if s else None
+        if isinstance(rm, str) and rm.strip().startswith("{"):
+            try:
+                rmj = json.loads(rm)
+                if isinstance(rmj, dict) and rmj.get("ground_truth") is not None:
+                    s = str(rmj.get("ground_truth")).strip()
+                    return s if s else None
+            except Exception:
+                pass
+
+    return None
+
+
+def _boxed_answers_from_modes(obj: Any) -> List[str]:
+    """Extract boxed answers from each mode's solution in the model JSON output."""
+    if not isinstance(obj, list) or not obj:
+        return []
+    rec = obj[0]
+    if not isinstance(rec, dict):
+        return []
+    modes = rec.get("modes")
+    if not isinstance(modes, list):
+        return []
+    answers: List[str] = []
+    for m in modes:
+        if not isinstance(m, dict):
+            continue
+        sol = m.get("solution")
+        if sol is None:
+            continue
+        ans = extract_final_answer(str(sol), method="boxed", boxed_cmd="\\boxed")
+        if ans is None:
+            continue
+        answers.append(str(ans).strip())
+    return answers
+
+
+def _verify_modes_match_ground_truth(obj: Any, ground_truth: str) -> Tuple[bool, str]:
+    """Verify all modes share the same boxed answer and exact-match ground_truth.
+
+    Returns:
+      (ok, detail) where detail is a short string for logging.
+    """
+    gt = str(ground_truth).strip()
+    if not gt:
+        return False, "empty_gt"
+
+    answers = _boxed_answers_from_modes(obj)
+    if not answers:
+        return False, "no_boxed"
+
+    # Require all extracted answers to be identical (exact_match after normalization).
+    base = answers[0]
+    for a in answers[1:]:
+        if not exact_match(str(a), str(base)):
+            return False, f"inconsistent_boxed: {answers!r}"
+
+    if not exact_match(str(base), gt):
+        return False, f"mismatch_boxed: pred={base!r} gt={gt!r}"
+
+    return True, "ok"
+
+
 # -------------------------
 # Dataset helpers
 # -------------------------
@@ -434,6 +525,15 @@ def main() -> None:
         try:
             content = client.complete(messages)
             arr = _extract_json_array(content)
+
+            gt = _ground_truth_from_row(df, i)
+            if gt is None:
+                raise ValueError("missing reward_model.ground_truth for verification")
+
+            ok, detail = _verify_modes_match_ground_truth(arr, gt)
+            if not ok:
+                raise ValueError(f"ground_truth verify failed: {detail}")
+
             hints = _hints_from_modes(arr)
             if not hints:
                 raise ValueError("parsed 0 hints")

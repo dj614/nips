@@ -1,0 +1,40 @@
+# models.yaml format:
+#   models:
+#     - tag: base
+#       path: Qwen/Qwen3-8B
+#     - tag: grpo
+#       path: /path/to/ckpt
+#       meta:
+#         algo: grpo
+
+models:
+  - tag: qwen_base
+    path: "${PRIMUS_SOURCE_CHECKPOINT_DIR}/Qwen3-8B"
+
+  - tag: qwen_dapo_944
+    path: "/primus_oss_root/repository/quark_sft/primus2b1d04f0cadadacea83e0c6a4z/save_checkpoint/global_step_944/actor/huggingface"
+    meta:
+      algo: dapo
+      job_id: "primus2b1d04f0cadadacea83e0c6a4z"
+      step: 944
+
+  - tag: qwen_grpo_1000
+    path: "/primus_oss_root/repository/quark_sft/primus0e8c74ef3a3a329dc5021c0a5z/save_checkpoint/global_step_1000/actor/huggingface"
+    meta:
+      algo: grpo
+      job_id: "primus0e8c74ef3a3a329dc5021c0a5z"
+      step: 1000
+
+  - tag: qwen_gspo_1000
+    path: "/primus_oss_root/repository/quark_sft/primus7c10d4c6d9f8808ea7d141934z/save_checkpoint/global_step_1000/actor/huggingface"
+    meta:
+      algo: gspo
+      job_id: "primus7c10d4c6d9f8808ea7d141934z"
+      step: 1000
+
+  - tag: qwen_drgrpo_1000
+    path: "/primus_oss_root/repository/quark_sft/primusa2ba04567a6d1800561f05c62z/save_checkpoint/global_step_1000/actor/huggingface"
+    meta:
+      algo: drgrpo
+      job_id: "primusa2ba04567a6d1800561f05c62z"
+      step: 1000

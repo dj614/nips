@@ -24,11 +24,13 @@ set -euo pipefail
 # This will auto-build a temp models file containing base+grpo (+ extras).
 
 OUTPUT_DIR=${PRIMUS_OUTPUT_DIR:-outputs}
-DATA_PATH_DEFAULT=${DATA_PATH_DEFAULT:-"/primus_datasets/zmy/NIPS/stem_code_with_hints.parquet"}
+DATA_DIR=${DATA_DIR:-"/primus_datasets/zmy"}
+DEFAULT_TESTSETS=(amc23 aime24 aime25)
 GROUP_BY=${GROUP_BY:-ability}
 
 MODELS_FILE=""
-DATA_PATH="$DATA_PATH_DEFAULT"
+DATA_PATH=""
+DATA_PATH_USER_SPECIFIED="false"
 OUTPUT_PATH="${OUTPUT_DIR}/NIPS/diagnosis.jsonl"
 SAVE_JSON="${OUTPUT_DIR}/NIPS/modebank_summary.json"
 
@@ -38,7 +40,7 @@ while [[ $# -gt 0 ]]; do
     --models_file)
       MODELS_FILE="$2"; shift 2;;
     --data_path)
-      DATA_PATH="$2"; shift 2;;
+      DATA_PATH="$2"; DATA_PATH_USER_SPECIFIED="true"; shift 2;;
     --output_path)
       OUTPUT_PATH="$2"; shift 2;;
     --save_json)
@@ -102,19 +104,46 @@ fi
 mkdir -p "$(dirname "$OUTPUT_PATH")"
 mkdir -p "$(dirname "$SAVE_JSON")"
 
-python scripts/run_mode_diagnosis.py \
-  --models_file "$MODELS_FILE" \
-  --data_path "$DATA_PATH" \
-  --output_path "$OUTPUT_PATH" \
-  --answer_extract boxed --boxed_cmd "\\boxed" \
-  --high_temp 1.0 --high_temp_samples 32 \
-  --low_temp 0.2 --low_temp_samples 8 \
-  --mid_temp 0.6 --mid_temp_samples_per_hint 4
+DATA_PATHS=()
+DATA_TAGS=()
+if [[ "$DATA_PATH_USER_SPECIFIED" == "true" ]]; then
+  DATA_PATHS+=("$DATA_PATH")
+  DATA_TAGS+=("custom")
+else
+  for t in "${DEFAULT_TESTSETS[@]}"; do
+    DATA_PATHS+=("${DATA_DIR}/GARO/test_data/${t}.parquet")
+    DATA_TAGS+=("$t")
+  done
+fi
 
-MANIFEST_PATH="${OUTPUT_PATH%.*}.manifest.json"
+for i in "${!DATA_PATHS[@]}"; do
+  dp="${DATA_PATHS[$i]}"
+  tag="${DATA_TAGS[$i]}"
 
-python scripts/summarize_modebank_diagnosis.py \
-  --manifest "$MANIFEST_PATH" \
-  --baseline_tag base \
-  --save_json "$SAVE_JSON" \
-  --group_by "$GROUP_BY"
+  out="$OUTPUT_PATH"
+  save="$SAVE_JSON"
+  if [[ "$DATA_PATH_USER_SPECIFIED" == "false" ]]; then
+    out="${OUTPUT_PATH%.*}_${tag}.jsonl"
+    save="${SAVE_JSON%.*}_${tag}.json"
+  fi
+
+  mkdir -p "$(dirname "$out")"
+  mkdir -p "$(dirname "$save")"
+
+  python scripts/run_mode_diagnosis.py \
+    --models_file "$MODELS_FILE" \
+    --data_path "$dp" \
+    --output_path "$out" \
+    --answer_extract boxed --boxed_cmd "\\boxed" \
+    --high_temp 1.0 --high_temp_samples 32 \
+    --low_temp 0.2 --low_temp_samples 8 \
+    --mid_temp 0.6 --mid_temp_samples_per_hint 4
+
+  MANIFEST_PATH="${out%.*}.manifest.json"
+
+  python scripts/summarize_modebank_diagnosis.py \
+    --manifest "$MANIFEST_PATH" \
+    --baseline_tag base \
+    --save_json "$save" \
+    --group_by "$GROUP_BY"
+done

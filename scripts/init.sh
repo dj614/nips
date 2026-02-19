@@ -24,5 +24,5 @@ done
 
 
 export RAY_PORT=6379
-source recipe/GARO/scripts/ray_init.sh
+source scripts/ray_init.sh
 init_ray

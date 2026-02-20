@@ -108,7 +108,7 @@ for t in "${TASKS[@]}"; do
   MANIFEST_PATH="${OUTPUT_JSONL%.*}.manifest.json"
   python scripts/summarize_modebank_diagnosis.py \
     --manifest "${MANIFEST_PATH}" \
-    --baseline_tag qwen3_8b \
+    --baseline_tag qwen_base \
     --group_by "${GROUP_BY}" \
     --save_json "${OUT_DIR}/modebank_summary.json"
 done

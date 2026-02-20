@@ -529,7 +529,9 @@ def main() -> None:
 
         prompt_obj = _normalize_prompt(df.at[i, "prompt"])
         problem_text = _extract_problem_text(prompt_obj)
-        user_prompt = INSTRUCTION_PROMPT.format(problems=problem_text)
+        if "{problems}" not in INSTRUCTION_PROMPT:
+            raise RuntimeError("INSTRUCTION_PROMPT missing '{problems}' placeholder")
+        user_prompt = INSTRUCTION_PROMPT.replace("{problems}", problem_text)
 
         messages = [
             {"role": "system", "content": "You are a helpful assistant."},

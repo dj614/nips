@@ -460,5 +460,3 @@ init_ray() {
     ray status >/dev/null 2>&1 || true
   fi
 }
-
-init_ray

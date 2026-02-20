@@ -9,18 +9,20 @@ column `mode` (expected to be a list[str]).
 Example:
 
   # In-place update (recommended after backing up):
-  PRIMUS_API_KEY=... \
+  QWEN_IP=... \
   python scripts/build_mode_hints_to_parquet.py \
     --data_path /primus_datasets/zmy/GARO/test_data/amc23.parquet \
     --output_path /primus_datasets/zmy/GARO/test_data/amc23.parquet
 
   # Or by TASK name and path template:
-  PRIMUS_API_KEY=... \
+  QWEN_IP=... \
   python scripts/build_mode_hints_to_parquet.py \
     --task amc23 --data_path_template '/primus_datasets/zmy/GARO/test_data/${TASK}.parquet'
 
 Notes:
-  - This script calls an internal Primus completion endpoint that streams via SSE.
+  - Endpoint is resolved from env `QWEN_IP`/`QWEN_IP` by default.
+    Set it to either host[:port] (we append `/v1/completions`) or a full URL.
+  - This script calls a completion endpoint that streams via SSE.
     We parse SSE using `requests` only (no extra dependency).
   - We write `mode` as list[str] (hints only) to match the existing diagnosis loader.
 """
@@ -91,7 +93,6 @@ INSTRUCTION_PROMPT = (
 @dataclass
 class PrimusClient:
     url: str
-    api_key: str
     model: str
     timeout: Optional[float] = None
 
@@ -122,7 +123,7 @@ class PrimusClient:
                 # keep generous defaults to match existing Primus usage
                 "max_prefill_tokens": 65536,
                 "context_length": 65536,
-                "max_new_tokens": 8192,
+                "max_new_tokens": 32767,
             },
         }
 
@@ -158,7 +159,6 @@ class PrimusClient:
 
         headers = {
             "Accept": "text/event-stream",
-            "Authorization": f"Bearer {self.api_key}",
         }
 
         try:
@@ -455,20 +455,16 @@ def main() -> None:
     ap.add_argument(
         "--primus_url",
         type=str,
-        default="http://shenma-ai-pub.alibaba-inc.com/v1/completions",
-        help="Primus completion endpoint URL",
+        default=None,
+        help=(
+            "Completion endpoint URL. If omitted, use env QWEN_IP/QWEN_IP and append /v1/completions if needed."
+        ),
     )
     ap.add_argument(
         "--model",
         type=str,
         default="qwen3-235b-instruct-trans-sg",
         help="Primus model name",
-    )
-    ap.add_argument(
-        "--api_key",
-        type=str,
-        default=None,
-        help="Primus API key. Prefer env PRIMUS_API_KEY.",
     )
     ap.add_argument(
         "--timeout",
@@ -485,11 +481,29 @@ def main() -> None:
     data_path = _resolve_data_path(args.task, args.data_path, args.data_path_template)
     out_path = args.output_path or data_path
 
-    api_key = args.api_key or os.environ.get("PRIMUS_API_KEY") or os.environ.get("QWEN_PRIMUS_API_KEY")
-    if not api_key:
-        raise SystemExit("Missing API key. Set env PRIMUS_API_KEY (recommended) or pass --api_key")
+    # Resolve endpoint from CLI or env (QWEN_IP preferred).
+    primus_url = None
+    if args.primus_url:
+        primus_url = str(args.primus_url).strip()
+    if not primus_url:
+        qip = os.environ.get("QWEN_IP") or os.environ.get("QWEN_IP")
+        if qip:
+            u = str(qip).strip()
+            if u:
+                if not (u.startswith("http://") or u.startswith("https://")):
+                    u = "http://" + u
+                u = u.rstrip("/")
+                if "/v1/" not in u:
+                    u = u + "/v1/completions"
+                primus_url = u
 
-    client = PrimusClient(url=args.primus_url, api_key=api_key, model=args.model, timeout=args.timeout)
+    if not primus_url:
+        raise SystemExit(
+            "Missing endpoint. Please export QWEN_IP (or QWEN_IP) as host[:port] or full URL, "
+            "or pass --primus_url explicitly."
+        )
+
+    client = PrimusClient(url=primus_url, model=args.model, timeout=args.timeout)
 
     print(f"[mode_hints] loading parquet: {data_path}")
     df = pd.read_parquet(data_path).reset_index(drop=True)

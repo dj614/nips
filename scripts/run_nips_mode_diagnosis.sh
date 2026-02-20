@@ -36,7 +36,7 @@ Environment overrides:
   HIGH_TEMP/HIGH_SAMPLES, LOW_TEMP/LOW_SAMPLES, MID_TEMP/MID_SAMPLES_PER_HINT
 
 Notes:
-  - Step (1) requires PRIMUS_API_KEY in the environment.
+  - Step (1) uses env QWEN_IP (or QWEN_IP) to route to the Qwen completion endpoint.
   - Mode hints are written in-place to the parquet files by default.
 EOF
 }

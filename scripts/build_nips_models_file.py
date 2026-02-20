@@ -46,10 +46,10 @@ class PrimusRLModel:
 
 
 DEFAULT_RL_MODELS: List[PrimusRLModel] = [
-    PrimusRLModel(method="dapo", job_id="primus2b1d04f0cadadacea83e0c6a4z", step=944),
-    PrimusRLModel(method="grpo", job_id="primus0e8c74ef3a3a329dc5021c0a5z", step=1000),
-    PrimusRLModel(method="gspo", job_id="primus7c10d4c6d9f8808ea7d141934z", step=1000),
-    PrimusRLModel(method="drgrpo", job_id="primusa2ba04567a6d1800561f05c62z", step=1000),
+    PrimusRLModel(method="dapo", job_id="primuseffeb454c8b1b32d4a42d1ceaz", step=944),
+    PrimusRLModel(method="grpo", job_id="primus700484b488be461409699766cz", step=1000),
+    PrimusRLModel(method="gspo", job_id="primus2d5c54d269dcc9eeada832707z", step=1000),
+    PrimusRLModel(method="drgrpo", job_id="primusf7613494698addeedab0555acz", step=1000),
 ]
 
 

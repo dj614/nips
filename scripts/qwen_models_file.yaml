@@ -12,29 +12,29 @@ models:
     path: "${PRIMUS_SOURCE_CHECKPOINT_DIR}/Qwen3-8B"
 
   - tag: qwen_dapo_944
-    path: "/primus_oss_root/repository/quark_sft/primus2b1d04f0cadadacea83e0c6a4z/save_checkpoint/global_step_944/actor/huggingface"
+    path: "/primus_oss_root/repository/quark_sft/primuseffeb454c8b1b32d4a42d1ceaz/save_checkpoint/global_step_944/actor/huggingface"
     meta:
       algo: dapo
-      job_id: "primus2b1d04f0cadadacea83e0c6a4z"
+      job_id: "primuseffeb454c8b1b32d4a42d1ceaz"
       step: 944
 
   - tag: qwen_grpo_1000
-    path: "/primus_oss_root/repository/quark_sft/primus0e8c74ef3a3a329dc5021c0a5z/save_checkpoint/global_step_1000/actor/huggingface"
+    path: "/primus_oss_root/repository/quark_sft/primus700484b488be461409699766cz/save_checkpoint/global_step_1000/actor/huggingface"
     meta:
       algo: grpo
-      job_id: "primus0e8c74ef3a3a329dc5021c0a5z"
+      job_id: "primus700484b488be461409699766cz"
       step: 1000
 
   - tag: qwen_gspo_1000
-    path: "/primus_oss_root/repository/quark_sft/primus7c10d4c6d9f8808ea7d141934z/save_checkpoint/global_step_1000/actor/huggingface"
+    path: "/primus_oss_root/repository/quark_sft/primus2d5c54d269dcc9eeada832707z/save_checkpoint/global_step_1000/actor/huggingface"
     meta:
       algo: gspo
-      job_id: "primus7c10d4c6d9f8808ea7d141934z"
+      job_id: "primus2d5c54d269dcc9eeada832707z"
       step: 1000
 
   - tag: qwen_drgrpo_1000
-    path: "/primus_oss_root/repository/quark_sft/primusa2ba04567a6d1800561f05c62z/save_checkpoint/global_step_1000/actor/huggingface"
+    path: "/primus_oss_root/repository/quark_sft/primusf7613494698addeedab0555acz/save_checkpoint/global_step_1000/actor/huggingface"
     meta:
       algo: drgrpo
-      job_id: "primusa2ba04567a6d1800561f05c62z"
+      job_id: "primusf7613494698addeedab0555acz"
       step: 1000

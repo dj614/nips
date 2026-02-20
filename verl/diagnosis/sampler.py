@@ -22,6 +22,7 @@ import torch
 
 from verl.utils import hf_tokenizer
 
+import os
 
 def _pick_input_device(model: torch.nn.Module) -> torch.device:
     # Works for both normal and sharded (device_map) models.
@@ -46,6 +47,9 @@ def load_model_and_tokenizer(
     rollout workers.
     """
     from transformers import AutoModelForCausalLM
+
+    if isinstance(model_name_or_path, str) and any(x in model_name_or_path for x in ("$", "~", "%")):
+        model_name_or_path = os.path.expanduser(os.path.expandvars(model_name_or_path))
 
     tokenizer = hf_tokenizer(model_name_or_path, trust_remote_code=trust_remote_code)
     tokenizer.padding_side = "left"

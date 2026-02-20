@@ -39,8 +39,25 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Sequence
 
-
 _TAG_SAFE_RE = re.compile(r"[^0-9a-zA-Z._-]+")
+_ENVVAR_RE = re.compile(r"\$\{[^}]+\}|\$[A-Za-z_][A-Za-z0-9_]*|%[A-Za-z_][A-Za-z0-9_]*%")
+
+
+def _expand_path(s: str) -> str:
+    """Expand shell-style env vars and user home in a path-like string.
+
+    Note: YAML/JSON does not expand ${VARS} automatically, so we do it here.
+    """
+    ss = str(s).strip()
+    if not ss:
+        return ss
+    if ("$" not in ss) and ("~" not in ss) and ("%" not in ss):
+        return ss
+    return os.path.expanduser(os.path.expandvars(ss))
+
+
+def _has_unexpanded_vars(s: str) -> bool:
+    return bool(_ENVVAR_RE.search(s))
 
 
 def sanitize_tag(tag: str) -> str:
@@ -115,13 +132,25 @@ def load_models_file(path: str) -> List[ModelSpec]:
         if not path_:
             raise ValueError(f"Model '{tag}' is missing 'path'")
 
+        # Expand ${ENV_VARS} / ~ in local paths. Without this, a path like
+        # "${PRIMUS_SOURCE_CHECKPOINT_DIR}/Qwen3-8B" will be treated as a HF
+        # repo id and fail validation.
+        path_s = _expand_path(str(path_))
+        if _has_unexpanded_vars(path_s) and not os.path.exists(path_s):
+            raise ValueError(
+                f"Model '{tag}' path contains unexpanded env var(s): {path_!r}. "
+                "YAML/JSON does not expand environment variables automatically; "
+                "make sure the variables are exported for the python process, "
+                "or replace them with an absolute path."
+            )
+
         meta = it.get("meta")
         if meta is None:
             meta = {}
         if not isinstance(meta, dict):
             raise TypeError(f"Model '{tag}' meta must be a dict, got: {type(meta)}")
 
-        out.append(ModelSpec(tag=str(tag), path=str(path_), meta=dict(meta)))
+        out.append(ModelSpec(tag=str(tag), path=path_s, meta=dict(meta)))
 
     if not out:
         raise ValueError(f"No models found in models file: {path}")

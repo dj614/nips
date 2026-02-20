@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-"""Build a models file (JSON) for GARO mode diagnosis.
+"""Build a models file (JSON) for NIPS mode diagnosis.
 
 This is a small convenience utility to create the `--models_file` consumed by
 `scripts/run_mode_diagnosis.py`.
@@ -19,11 +19,11 @@ Default RL models are the ones listed in the request.
 
 Example:
 
-  python scripts/build_garo_models_file.py \
-    --output_path outputs/GARO/models.json
+  python scripts/build_nips_models_file.py \
+    --output_path outputs/NIPS/models.json
 
   # Override / extend from CLI:
-  python scripts/build_garo_models_file.py \
+  python scripts/build_nips_models_file.py \
     --output_path /tmp/models.json \
     --add_model dapo primus... 944 \
     --add_model grpo primus... 1000
@@ -78,7 +78,7 @@ def _parse_add_model(values: List[str]) -> PrimusRLModel:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Build models.json for GARO mode diagnosis")
+    ap = argparse.ArgumentParser(description="Build models.json for NIPS mode diagnosis")
     ap.add_argument(
         "--output_path",
         type=str,
@@ -142,7 +142,7 @@ def main() -> None:
     os.makedirs(os.path.dirname(args.output_path) or ".", exist_ok=True)
     with open(args.output_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
-    print(f"[build_garo_models_file] wrote: {args.output_path}")
+    print(f"[build_nips_models_file] wrote: {args.output_path}")
 
 
 if __name__ == "__main__":

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# End-to-end runner for GARO mode diagnosis.
+# End-to-end runner for NIPS mode diagnosis.
 #
 # It performs:
 #   (1) mode hint generation by Primus API: writes `mode` (list[str]) into each parquet.
 #   (2) offline sampling + ModeBank metrics for base + RL-trained models.
 
 OUTPUT_DIR=${PRIMUS_OUTPUT_DIR:-outputs}
-DATA_ROOT=${GARO_DATA_ROOT:-"/primus_datasets/zmy/GARO/test_data"}
+DATA_ROOT="/primus_datasets/zmy/GARO/test_data"
 TASKS_CSV=${TASKS_CSV:-"amc23,aime24,aime25"}
 GROUP_BY=${GROUP_BY:-ability}
 
@@ -20,19 +20,19 @@ LOW_SAMPLES=${LOW_SAMPLES:-8}
 MID_TEMP=${MID_TEMP:-0.6}
 MID_SAMPLES_PER_HINT=${MID_SAMPLES_PER_HINT:-4}
 
-MODELS_FILE=${MODELS_FILE:-"${OUTPUT_DIR}/GARO/models.json"}
+MODELS_FILE="scripts/models_file.yaml"
 SKIP_MODE_GEN=0
 ONLY_MODE_GEN=0
 
 usage() {
   cat <<EOF
 Usage:
-  bash scripts/run_garo_mode_diagnosis.sh [--skip_mode_gen] [--only_mode_gen] \
+  bash scripts/run_nips_mode_diagnosis.sh [--skip_mode_gen] [--only_mode_gen] \
     [--tasks "amc23,aime24,aime25"] [--data_root /path/to/test_data] \
-    [--models_file /path/to/models.json] [--output_dir outputs/GARO]
+    [--models_file /path/to/models.json] [--output_dir outputs/NIPS]
 
 Environment overrides:
-  GARO_DATA_ROOT, TASKS_CSV, PRIMUS_OUTPUT_DIR, GROUP_BY,
+  TASKS_CSV, PRIMUS_OUTPUT_DIR, GROUP_BY,
   HIGH_TEMP/HIGH_SAMPLES, LOW_TEMP/LOW_SAMPLES, MID_TEMP/MID_SAMPLES_PER_HINT
 
 Notes:
@@ -63,11 +63,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-mkdir -p "${OUTPUT_DIR}/GARO"
+mkdir -p "${OUTPUT_DIR}/NIPS"
 
 # Build default models file if missing (JSON -> no PyYAML dependency).
 if [[ ! -f "${MODELS_FILE}" ]]; then
-  python scripts/build_garo_models_file.py --output_path "${MODELS_FILE}"
+  python scripts/build_nips_models_file.py --output_path "${MODELS_FILE}"
 fi
 
 IFS="," read -r -a TASKS <<< "${TASKS_CSV}"
@@ -78,11 +78,11 @@ for t in "${TASKS[@]}"; do
     continue
   fi
   DATA_PATH="${DATA_ROOT}/${t}.parquet"
-  OUT_DIR="${OUTPUT_DIR}/GARO/${t}"
+  OUT_DIR="${OUTPUT_DIR}/NIPS/${t}"
   mkdir -p "${OUT_DIR}"
 
   if [[ ${SKIP_MODE_GEN} -eq 0 ]]; then
-    echo "[garo_mode] (1) build mode hints -> ${DATA_PATH}"
+    echo "[nips_mode] (1) build mode hints -> ${DATA_PATH}"
     python scripts/build_mode_hints_to_parquet.py \
       --data_path "${DATA_PATH}" \
       --output_path "${DATA_PATH}" \
@@ -93,7 +93,7 @@ for t in "${TASKS[@]}"; do
     continue
   fi
 
-  echo "[garo_mode] (2) run diagnosis on ${t}"
+  echo "[nips_mode] (2) run diagnosis on ${t}"
   OUTPUT_JSONL="${OUT_DIR}/diagnosis.jsonl"
 
   python scripts/run_mode_diagnosis.py \
@@ -113,4 +113,4 @@ for t in "${TASKS[@]}"; do
     --save_json "${OUT_DIR}/modebank_summary.json"
 done
 
-echo "[garo_mode] done. outputs under: ${OUTPUT_DIR}/GARO"
+echo "[nips_mode] done. outputs under: ${OUTPUT_DIR}/NIPS"

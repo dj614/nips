@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-"""Generate per-problem mode hints via Primus Qwen API and write back to parquet.
+"""Generate per-problem mode hints via a vLLM-style /v1/completions API and write back to parquet.
 
 This script prepares datasets for `scripts/run_mode_diagnosis.py`.
 `verl/diagnosis/data.py` reads per-problem reachable mode hints from the dataset
@@ -22,8 +22,10 @@ Example:
 Notes:
   - Endpoint is resolved from env `QWEN_IP`/`QWEN_IP` by default.
     Set it to either host[:port] (we append `/v1/completions`) or a full URL.
-  - This script calls a completion endpoint that streams via SSE.
-    We parse SSE using `requests` only (no extra dependency).
+  - The completion API is expected to be compatible with the OpenAI-style
+    `/v1/completions` schema returned by vLLM:
+      request payload: {"prompt": ..., ...generation_params}
+      response: {"choices": [{"text": ..., "finish_reason": ...}, ...]}
   - We write `mode` as list[str] (hints only) to match the existing diagnosis loader.
 """
 
@@ -86,15 +88,79 @@ INSTRUCTION_PROMPT = (
 
 
 # -------------------------
-# Primus Qwen SSE client
+# vLLM-style /v1/completions client
 # -------------------------
+
+
+def send_request(
+    prompt: str,
+    ip: str = "localhost",
+    port: str = "8000",
+    url: str = "http://localhost:port/v1/completions",
+    param_gen: Optional[Dict[str, Any]] = None,
+    timeout_seconds: float = 300,
+) -> Tuple[str, List[str]]:
+    """Send a single /v1/completions request.
+
+    This follows the reference calling pattern used elsewhere in the codebase.
+    """
+
+    if param_gen is None:
+        param_gen = {}
+
+    url = url.replace("localhost", str(ip))
+    url = url.replace("port", str(port))
+    payload = {
+        "prompt": prompt,
+        **param_gen,
+    }
+
+    with requests.post(url, json=payload, timeout=timeout_seconds) as response:
+        try:
+            response.raise_for_status()
+        except Exception as e:
+            print(f"[vllm_utils:send_request] Error: {repr(e)} - {response}")
+            response = repr(e)
+            finish_reason = "stop"
+            return response, [finish_reason]
+
+        result = response.json()
+        text = result["choices"][-1].get("text", "")
+        finish_reason = result["choices"][-1].get("finish_reason", "stop")
+        return text, [finish_reason]
+
+
+def get_model_output(
+    prompt: str,
+    param_gen: Dict[str, Any],
+    ip: str = "localhost",
+    port: str = "8000",
+    url: str = "http://localhost:port/v1/completions",
+    timeout_seconds: float = 300,
+) -> Tuple[str, List[str]]:
+    """Wrapper with a broad try/except to match existing tooling."""
+
+    try:
+        res, finish_reason = send_request(
+            ip=ip,
+            port=port,
+            prompt=prompt,
+            param_gen=param_gen,
+            url=url,
+            timeout_seconds=timeout_seconds,
+        )
+    except Exception as error:
+        print(f"HTTP exception error: {error}")
+        res, finish_reason = "", ["error"]
+    return res, finish_reason
 
 
 @dataclass
 class PrimusClient:
     url: str
-    model: str
     timeout: Optional[float] = None
+    # Generation params (top-level keys in the /v1/completions payload).
+    param_gen: Optional[Dict[str, Any]] = None
 
     def _convert_openai_messages_to_prompt(self, messages: List[Dict[str, str]]) -> str:
         parts: List[str] = []
@@ -108,97 +174,25 @@ class PrimusClient:
         parts.append("<|im_start|>assistant\n")
         return "".join(parts)
 
-    def _build_request_data(self, prompt: str, model: str) -> Dict[str, Any]:
-        request_id = uuid.uuid4().hex
-        session_id = uuid.uuid4().hex
-        return {
-            "session_id": session_id,
-            "request_id": request_id,
-            "model": model,
-            "prompt": prompt,
-            "extra_args": {
-                "top_k": 50,
-                "top_p": 0.8,
-                "temperature": 0.5,
-                # keep generous defaults to match existing Primus usage
-                "max_prefill_tokens": 65536,
-                "context_length": 65536,
-                "max_new_tokens": 32767,
-            },
-        }
+    def complete(self, messages: List[Dict[str, str]]) -> str:
+        """Send a single completion request and return the `text` field."""
 
-    def _iter_sse(self, resp: requests.Response) -> Iterable[Tuple[Optional[str], str]]:
-        """Yield (event_name, data) from an SSE response."""
-        event: Optional[str] = None
-        data_lines: List[str] = []
-        for raw in resp.iter_lines(decode_unicode=True):
-            if raw is None:
-                continue
-            line = raw.strip("\r")
-            if not line:
-                if data_lines:
-                    yield event, "\n".join(data_lines)
-                event = None
-                data_lines = []
-                continue
-            if line.startswith(":"):
-                continue
-            if line.startswith("event:"):
-                event = line.split(":", 1)[1].strip() or None
-                continue
-            if line.startswith("data:"):
-                data_lines.append(line.split(":", 1)[1].lstrip())
-                continue
-        if data_lines:
-            yield event, "\n".join(data_lines)
-
-    def complete(self, messages: List[Dict[str, str]], *, model: Optional[str] = None) -> str:
-        model = model or self.model
         prompt = self._convert_openai_messages_to_prompt(messages)
-        payload = self._build_request_data(prompt, model)
 
-        headers = {
-            "Accept": "text/event-stream",
-        }
+        # Default generation parameters (match the reference style and keep stable behavior).
+        param_gen = dict(self.param_gen or {})
+        param_gen.setdefault("top_k", 50)
+        param_gen.setdefault("top_p", 0.8)
+        param_gen.setdefault("temperature", 0.5)
+        param_gen.setdefault("max_tokens", 1024)
 
-        try:
-            resp = requests.post(self.url, json=payload, headers=headers, stream=True, timeout=self.timeout)
-        except Exception as e:
-            raise RuntimeError(
-                f"primus request failed: {type(e).__name__}: {e}; url={self.url}; model={model}; request_id={payload.get('request_id')}"
-            )
-
-        if not resp.ok:
-            body_preview = (resp.text or "")[:800]
-            raise RuntimeError(
-                f"primus HTTP {resp.status_code}; url={self.url}; model={model}; request_id={payload.get('request_id')}; body[:800]={body_preview!r}"
-            )
-
-        last_content = ""
-        for ev, data in self._iter_sse(resp):
-            if not data:
-                continue
-            try:
-                raw = json.loads(data)
-            except Exception:
-                # Some servers may send non-JSON keep-alives; ignore.
-                continue
-
-            # Expected schema: raw["choices"][0]["message"]["content"]
-            try:
-                choices = raw.get("choices")
-                if isinstance(choices, list) and choices:
-                    msg = choices[0].get("message") or {}
-                    content = msg.get("content") or ""
-                    if isinstance(content, str):
-                        last_content = content
-            except Exception:
-                pass
-
-            if ev == "complete":
-                break
-
-        return last_content
+        text, _finish = get_model_output(
+            prompt=prompt,
+            param_gen=param_gen,
+            url=self.url,
+            timeout_seconds=float(self.timeout) if self.timeout is not None else 300,
+        )
+        return text
 
 
 # -------------------------
@@ -464,7 +458,7 @@ def main() -> None:
         "--model",
         type=str,
         default="qwen3-235b-instruct-trans-sg",
-        help="Primus model name",
+        help="(Deprecated) Kept for backward compatibility; the /v1/completions endpoint selects the served model.",
     )
     ap.add_argument(
         "--timeout",
@@ -503,7 +497,7 @@ def main() -> None:
             "or pass --primus_url explicitly."
         )
 
-    client = PrimusClient(url=primus_url, model=args.model, timeout=args.timeout)
+    client = PrimusClient(url=primus_url, timeout=args.timeout)
 
     print(f"[mode_hints] loading parquet: {data_path}")
     df = pd.read_parquet(data_path).reset_index(drop=True)

@@ -11,13 +11,13 @@ Example:
   # In-place update (recommended after backing up):
   QWEN_IP=... \
   python scripts/build_mode_hints_to_parquet.py \
-    --data_path /primus_datasets/zmy/GARO/test_data/amc23.parquet \
-    --output_path /primus_datasets/zmy/GARO/test_data/amc23.parquet
+    --data_path /primus_datasets/zmy/NIPS/test_data/amc23.parquet \
+    --output_path /primus_datasets/zmy/NIPS/test_data/amc23.parquet
 
   # Or by TASK name and path template:
   QWEN_IP=... \
   python scripts/build_mode_hints_to_parquet.py \
-    --task amc23 --data_path_template '/primus_datasets/zmy/GARO/test_data/${TASK}.parquet'
+    --task amc23 --data_path_template '/primus_datasets/zmy/NIPS/test_data/${TASK}.parquet'
 
 Notes:
   - Endpoint is resolved from env `QWEN_IP`/`QWEN_IP` by default.
@@ -419,8 +419,8 @@ def main() -> None:
     ap.add_argument(
         "--data_path_template",
         type=str,
-        default="/primus_datasets/zmy/GARO/test_data/${TASK}.parquet",
-        help="Template for --task (default matches user's GARO paths)",
+        default="/primus_datasets/zmy/NIPS/test_data/${TASK}.parquet",
+        help="Template for --task (default matches user's NIPS paths)",
     )
     ap.add_argument(
         "--output_path",

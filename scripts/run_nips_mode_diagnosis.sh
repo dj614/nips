@@ -8,7 +8,7 @@ set -euo pipefail
 #   (2) offline sampling + ModeBank metrics for base + RL-trained models.
 
 OUTPUT_DIR=${PRIMUS_OUTPUT_DIR:-outputs}
-DATA_ROOT="/primus_datasets/zmy/GARO/test_data"
+DATA_ROOT="/primus_datasets/zmy/NIPS/test_data"
 TASKS_CSV=${TASKS_CSV:-"amc23,aime24,aime25"}
 GROUP_BY=${GROUP_BY:-ability}
 

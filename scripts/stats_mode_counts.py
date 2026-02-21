@@ -133,7 +133,7 @@ def main():
         "--template",
         type=str,
         default=None,
-        help='Path template with ${TASK}, e.g. "/primus_datasets/zmy/GARO/test_data/${TASK}.parquet"',
+        help='Path template with ${TASK}, e.g. "/primus_datasets/zmy/NIPS/test_data/${TASK}.parquet"',
     )
     ap.add_argument(
         "--tasks",

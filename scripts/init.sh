@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run this script under the root directory of GARO
+# Run this script under the root directory of NIPS
 
 # bash scripts/install_vllm_sglang_mcore.sh
 pip install --no-deps -e .

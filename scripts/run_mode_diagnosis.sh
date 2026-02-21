@@ -111,7 +111,7 @@ if [[ "$DATA_PATH_USER_SPECIFIED" == "true" ]]; then
   DATA_TAGS+=("custom")
 else
   for t in "${DEFAULT_TESTSETS[@]}"; do
-    DATA_PATHS+=("${DATA_DIR}/GARO/test_data/${t}.parquet")
+    DATA_PATHS+=("${DATA_DIR}/NIPS/test_data/${t}.parquet")
     DATA_TAGS+=("$t")
   done
 fi

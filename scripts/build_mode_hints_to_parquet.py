@@ -27,6 +27,9 @@ Notes:
       request payload: {"prompt": ..., ...generation_params}
       response: {"choices": [{"text": ..., "finish_reason": ...}, ...]}
   - We write `mode` as list[str] (hints only) to match the existing diagnosis loader.
+  - By default, we DO NOT overwrite the input parquet. Instead, we write to a new file
+    with suffix `.with_mode.parquet` (to avoid clobbering data on slow network filesystems).
+    Use `--inplace` to overwrite input explicitly.
 """
 
 from __future__ import annotations
@@ -405,6 +408,33 @@ def _resolve_data_path(task: Optional[str], data_path: Optional[str], template: 
     return template.replace("${TASK}", task)
 
 
+def _default_output_path(data_path: str) -> str:
+    """Return a safe default output path that does not overwrite the input."""
+    p = str(data_path)
+    if p.endswith(".parquet"):
+        return p[: -len(".parquet")] + ".with_mode.parquet"
+    return p + ".with_mode.parquet"
+
+
+def _wait_until_parquet_readable(path: str, max_retries: int = 8, base_sleep: float = 1.0) -> None:
+    """Best-effort: wait until a parquet becomes readable.
+
+    This mitigates eventual-consistency delays on network / cloud-backed storage.
+    """
+
+    last_err: Optional[BaseException] = None
+    for r in range(max_retries):
+        try:
+            # Read a tiny subset to validate metadata + footer availability.
+            _ = pd.read_parquet(path, columns=["prompt", "mode"]).head(1)
+            return
+        except Exception as e:
+            last_err = e
+            time.sleep(base_sleep * (2**r))
+
+    raise RuntimeError(f"output parquet not readable after retries: {path} ({last_err})")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Generate per-problem mode hints and write to parquet (column: mode)")
 
@@ -420,7 +450,15 @@ def main() -> None:
         "--output_path",
         type=str,
         default=None,
-        help="Output parquet path. Default: overwrite input path.",
+        help=(
+            "Output parquet path. Default: write to a new file with suffix '\.with_mode.parquet' "
+            "(does NOT overwrite input)."
+        ),
+    )
+    ap.add_argument(
+        "--inplace",
+        action="store_true",
+        help="Overwrite input parquet in place (DANGEROUS on slow network filesystems).",
     )
     ap.add_argument(
         "--only_missing",
@@ -473,7 +511,15 @@ def main() -> None:
     only_missing = bool(args.only_missing) or not bool(args.overwrite)
 
     data_path = _resolve_data_path(args.task, args.data_path, args.data_path_template)
-    out_path = args.output_path or data_path
+    if args.output_path:
+        out_path = str(args.output_path)
+    else:
+        out_path = data_path if args.inplace else _default_output_path(data_path)
+
+    if (not args.inplace) and (out_path == data_path):
+        raise SystemExit(
+            "Refusing to overwrite input parquet without --inplace. Set --output_path or pass --inplace."
+        )
 
     # Resolve endpoint from CLI or env (QWEN_IP preferred).
     primus_url = None
@@ -567,6 +613,7 @@ def main() -> None:
     tmp_path = f"{out_path}.tmp.{uuid.uuid4().hex[:8]}"
     df.to_parquet(tmp_path, index=False)
     os.replace(tmp_path, out_path)
+    _wait_until_parquet_readable(out_path)
     print(f"[mode_hints] done. wrote={n_done} skipped={n_skip} failed={n_fail} -> {out_path}")
 
 

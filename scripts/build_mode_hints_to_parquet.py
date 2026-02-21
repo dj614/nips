@@ -91,81 +91,182 @@ INSTRUCTION_PROMPT = (
 
 
 # -------------------------
-# vLLM-style /v1/completions client
+# -------------------------
+# OpenAI-compatible client (/v1/completions or /v1/chat/completions)
 # -------------------------
 
 
-def send_request(
-    prompt: str,
-    ip: str = "localhost",
-    port: str = "8000",
-    url: str = "http://localhost:port/v1/completions",
-    param_gen: Optional[Dict[str, Any]] = None,
-    timeout_seconds: float = 300,
-) -> Tuple[str, List[str]]:
-    """Send a single /v1/completions request.
-
-    This follows the reference calling pattern used elsewhere in the codebase.
-    """
-
-    if param_gen is None:
-        param_gen = {}
-
-    url = url.replace("localhost", str(ip))
-    url = url.replace("port", str(port))
-    payload = {
-        "prompt": prompt,
-        **param_gen,
-    }
-
-    with requests.post(url, json=payload, timeout=timeout_seconds) as response:
-        try:
-            response.raise_for_status()
-        except Exception as e:
-            print(f"[vllm_utils:send_request] Error: {repr(e)} - {response}")
-            response = repr(e)
-            finish_reason = "stop"
-            return response, [finish_reason]
-
-        result = response.json()
-        text = result["choices"][-1].get("text", "")
-        finish_reason = result["choices"][-1].get("finish_reason", "stop")
-        return text, [finish_reason]
+class APIRequestError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        url: Optional[str] = None,
+        status_code: Optional[int] = None,
+        body: Optional[str] = None,
+    ) -> None:
+        super().__init__(message)
+        self.url = url
+        self.status_code = status_code
+        self.body = body
 
 
-def get_model_output(
-    prompt: str,
-    param_gen: Dict[str, Any],
-    ip: str = "localhost",
-    port: str = "8000",
-    url: str = "http://localhost:port/v1/completions",
-    timeout_seconds: float = 300,
-) -> Tuple[str, List[str]]:
-    """Wrapper with a broad try/except to match existing tooling."""
+def _endpoint_kind(url: str) -> str:
+    u = (url or "").lower()
+    # Must check chat first because it also contains "completions".
+    if "/chat/completions" in u:
+        return "chat"
+    if "/completions" in u:
+        return "completions"
+    return "unknown"
+
+
+def _swap_completions_endpoint(url: str) -> str:
+    u = str(url).rstrip("/")
+    if u.endswith("/v1/completions"):
+        return u[: -len("/v1/completions")] + "/v1/chat/completions"
+    if u.endswith("/v1/chat/completions"):
+        return u[: -len("/v1/chat/completions")] + "/v1/completions"
+    # If user passed a base URL (or something else), be conservative.
+    if u.endswith("/v1"):
+        return u + "/chat/completions"
+    return u + "/v1/chat/completions"
+
+
+def _post_json(
+    url: str,
+    payload: Dict[str, Any],
+    *,
+    timeout_seconds: float,
+    headers: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    try:
+        resp = requests.post(url, json=payload, timeout=timeout_seconds, headers=headers or {})
+    except requests.RequestException as e:
+        raise APIRequestError(f"request failed: {e}", url=url) from e
+
+    if not resp.ok:
+        # Keep error body short to avoid spamming logs.
+        body = (resp.text or "").strip()
+        if len(body) > 800:
+            body = body[:800] + " ... (truncated)"
+        raise APIRequestError(
+            f"http error: {resp.status_code}",
+            url=url,
+            status_code=int(resp.status_code),
+            body=body,
+        )
 
     try:
-        res, finish_reason = send_request(
-            ip=ip,
-            port=port,
-            prompt=prompt,
-            param_gen=param_gen,
-            url=url,
-            timeout_seconds=timeout_seconds,
-        )
-    except Exception as error:
-        print(f"HTTP exception error: {error}")
-        res, finish_reason = "", ["error"]
-    return res, finish_reason
+        out = resp.json()
+    except Exception as e:
+        body = (resp.text or "").strip()
+        if len(body) > 800:
+            body = body[:800] + " ... (truncated)"
+        raise APIRequestError("non-json response", url=url, body=body) from e
+
+    if not isinstance(out, dict):
+        raise APIRequestError(f"unexpected response type: {type(out)}", url=url)
+    return out
+
+
+def _extract_text_from_openai_result(result: Dict[str, Any]) -> str:
+    # vLLM / OpenAI-like responses generally have `choices`.
+    choices = result.get("choices")
+    if isinstance(choices, list) and choices:
+        c = choices[-1]
+        if isinstance(c, dict):
+            if c.get("text") is not None:
+                return str(c.get("text"))
+            msg = c.get("message")
+            if isinstance(msg, dict) and msg.get("content") is not None:
+                return str(msg.get("content"))
+
+    # Surface API error if present.
+    err = result.get("error")
+    if isinstance(err, dict):
+        msg = err.get("message") or err.get("type") or "unknown_error"
+        raise APIRequestError(f"api error: {msg}")
+
+    raise APIRequestError("unexpected response schema (missing choices/text/message.content)")
+
+
+def _call_openai_compatible(
+    *,
+    url: str,
+    model: Optional[str],
+    messages: List[Dict[str, str]],
+    prompt: Optional[str],
+    param_gen: Dict[str, Any],
+    timeout_seconds: float,
+    headers: Optional[Dict[str, str]] = None,
+) -> Tuple[str, str, str]:
+    """Call either /v1/completions or /v1/chat/completions.
+
+    Returns:
+      (text, used_url, used_kind)
+    """
+
+    def _payload_for(k: str) -> Dict[str, Any]:
+        payload: Dict[str, Any] = dict(param_gen or {})
+        if model:
+            payload["model"] = str(model)
+        if k == "chat":
+            payload["messages"] = messages
+        else:
+            payload["prompt"] = prompt if prompt is not None else ""
+        return payload
+
+    kind = _endpoint_kind(url)
+
+    def _try(k: str, u: str) -> str:
+        payload = _payload_for(k)
+        result = _post_json(u, payload, timeout_seconds=timeout_seconds, headers=headers)
+        return _extract_text_from_openai_result(result)
+
+    # If the URL already points at a known endpoint, try it first, then fallback to the sibling.
+    if kind in ("chat", "completions"):
+        try:
+            return _try(kind, url), url, kind
+        except APIRequestError as e:
+            # Many clusters only expose one of the endpoints; gracefully fallback.
+            if e.status_code in (404, 405) or "unexpected response schema" in str(e):
+                alt_url = _swap_completions_endpoint(url)
+                alt_kind = "chat" if kind == "completions" else "completions"
+                return _try(alt_kind, alt_url), alt_url, alt_kind
+            raise
+
+    # Unknown URL: try completions first (backward-compatible), then chat.
+    last_err: Optional[APIRequestError] = None
+    for k_try, u_try in (("completions", url), ("chat", _swap_completions_endpoint(url))):
+        try:
+            return _try(k_try, u_try), u_try, k_try
+        except APIRequestError as e:
+            last_err = e
+            if e.status_code in (404, 405):
+                continue
+            break
+
+    raise last_err or APIRequestError("failed to resolve a working completion endpoint", url=url)
 
 
 @dataclass
 class PrimusClient:
     url: str
     timeout: Optional[float] = None
-    # Generation params (top-level keys in the /v1/completions payload).
+    model: Optional[str] = None
+    api_key: Optional[str] = None
+    # Generation params (top-level keys in the OpenAI-compatible payload).
     param_gen: Optional[Dict[str, Any]] = None
 
+    def _default_headers(self) -> Dict[str, str]:
+        key = (self.api_key or "").strip()
+        if not key:
+            return {}
+        return {"Authorization": f"Bearer {key}"}
+
     def _convert_openai_messages_to_prompt(self, messages: List[Dict[str, str]]) -> str:
+        # Qwen / chatml-style text prompt (works with many /v1/completions servers).
         parts: List[str] = []
         for msg in messages:
             role = str(msg.get("role", "user"))
@@ -178,23 +279,43 @@ class PrimusClient:
         return "".join(parts)
 
     def complete(self, messages: List[Dict[str, str]]) -> str:
-        """Send a single completion request and return the `text` field."""
+        """Send a single request and return assistant text."""
 
-        prompt = self._convert_openai_messages_to_prompt(messages)
-
-        # Default generation parameters (match the reference style and keep stable behavior).
+        # Default generation parameters (keep stable behavior).
         param_gen = dict(self.param_gen or {})
         param_gen.setdefault("top_k", 50)
         param_gen.setdefault("top_p", 0.8)
         param_gen.setdefault("temperature", 0.5)
         param_gen.setdefault("max_tokens", 1024)
 
-        text, _finish = get_model_output(
-            prompt=prompt,
-            param_gen=param_gen,
-            url=self.url,
-            timeout_seconds=float(self.timeout) if self.timeout is not None else 300,
-        )
+        timeout_seconds = float(self.timeout) if self.timeout is not None else 300.0
+
+        # Build both prompt and messages; backend decides which one it uses.
+        prompt = self._convert_openai_messages_to_prompt(messages)
+
+        try:
+            text, used_url, _used_kind = _call_openai_compatible(
+                url=self.url,
+                model=self.model,
+                messages=messages,
+                prompt=prompt,
+                param_gen=param_gen,
+                timeout_seconds=timeout_seconds,
+                headers=self._default_headers(),
+            )
+        except APIRequestError as e:
+            extra = []
+            if e.url:
+                extra.append(f"url={e.url}")
+            if e.status_code is not None:
+                extra.append(f"status={e.status_code}")
+            if e.body:
+                extra.append(f"body={e.body}")
+            detail = (" | " + " ".join(extra)) if extra else ""
+            raise RuntimeError(f"LLM API call failed: {e}{detail}") from e
+
+        # Auto-heal: keep using the working URL in later calls.
+        self.url = used_url
         return text
 
 
@@ -489,20 +610,29 @@ def main() -> None:
         type=str,
         default=None,
         help=(
-            "Completion endpoint URL. If omitted, use env QWEN_IP/QWEN_IP and append /v1/completions if needed."
+            "OpenAI-compatible completion endpoint URL. If omitted, use env QWEN_IP and append /v1/completions if needed. Both /v1/completions and /v1/chat/completions are supported (auto-fallback)."
         ),
     )
     ap.add_argument(
         "--model",
         type=str,
         default="qwen3-235b-instruct-trans-sg",
-        help="(Deprecated) Kept for backward compatibility; the /v1/completions endpoint selects the served model.",
+        help="Model name (sent as `model` in the OpenAI-compatible payload). Some servers require this field.",
     )
     ap.add_argument(
         "--timeout",
         type=float,
         default=None,
         help="Optional requests timeout (seconds)",
+    )
+
+
+
+    ap.add_argument(
+        "--api_key",
+        type=str,
+        default=None,
+        help="Optional API key for OpenAI-compatible servers (also read from env OPENAI_API_KEY / QWEN_API_KEY).",
     )
 
     args = ap.parse_args()
@@ -526,7 +656,7 @@ def main() -> None:
     if args.primus_url:
         primus_url = str(args.primus_url).strip()
     if not primus_url:
-        qip = os.environ.get("QWEN_IP") or os.environ.get("QWEN_IP")
+        qip = os.environ.get("QWEN_IP") or os.environ.get("QWEN_URL") or os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_BASE")
         if qip:
             u = str(qip).strip()
             if u:
@@ -543,7 +673,19 @@ def main() -> None:
             "or pass --primus_url explicitly."
         )
 
-    client = PrimusClient(url=primus_url, timeout=args.timeout)
+    api_key = (
+        (args.api_key.strip() if args.api_key else None)
+        or os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("QWEN_API_KEY")
+        or os.environ.get("API_KEY")
+    )
+
+    client = PrimusClient(
+        url=primus_url,
+        timeout=args.timeout,
+        model=(str(args.model).strip() if args.model else None),
+        api_key=api_key,
+    )
 
     print(f"[mode_hints] loading parquet: {data_path}")
     df = pd.read_parquet(data_path).reset_index(drop=True)

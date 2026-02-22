@@ -21,6 +21,7 @@ Example:
 
 Notes:
   - Endpoint is resolved from env `QWEN_IP`/`QWEN_IP` by default.
+    If you provide only a host (e.g., `10.2.5.30`), we will default to port 8000.
     Set it to either host[:port] (we append `/v1/completions`) or a full URL.
   - The completion API is expected to be compatible with the OpenAI-style
     `/v1/completions` schema returned by vLLM:
@@ -656,13 +657,42 @@ def main() -> None:
     if args.primus_url:
         primus_url = str(args.primus_url).strip()
     if not primus_url:
-        qip = os.environ.get("QWEN_IP") or os.environ.get("QWEN_URL") or os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_BASE")
+        qip = None
+        qip_src = None
+        v = os.environ.get("QWEN_IP")
+        qip = v
+        qip_src = "QWEN_IP"
         if qip:
             u = str(qip).strip()
             if u:
                 if not (u.startswith("http://") or u.startswith("https://")):
                     u = "http://" + u
                 u = u.rstrip("/")
+                # Hard-coded default: our vLLM/OpenAI-compatible service listens on 8000.
+                # Only apply to the QWEN_* envs; do not rewrite generic OpenAI base URLs.
+                if qip_src == "QWEN_IP":
+                    # Insert default port if the URL netloc doesn't already contain one.
+                    # Examples:
+                    #   http://10.2.5.30          -> http://10.2.5.30:8000
+                    #   http://10.2.5.30/v1/...   -> http://10.2.5.30:8000/v1/...
+                    try:
+                        scheme, rest = u.split("://", 1)
+                        netloc, sep, tail = rest.partition("/")
+                        auth, at, hostport = netloc.rpartition("@")
+                        if at:
+                            host = hostport
+                        else:
+                            auth = ""
+                            host = netloc
+                        # Avoid mishandling IPv6 literals like "[::1]".
+                        if host and not host.startswith("[") and ":" not in host:
+                            host = f"{host}:8000"
+                            netloc = f"{auth}@{host}" if auth else host
+                            rest = netloc + (sep + tail if sep else "")
+                            u = f"{scheme}://{rest}"
+                    except Exception:
+                        # Be conservative on parsing errors.
+                        pass
                 if "/v1/" not in u:
                     u = u + "/v1/completions"
                 primus_url = u

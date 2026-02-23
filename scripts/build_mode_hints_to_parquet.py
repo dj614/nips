@@ -27,7 +27,8 @@ Notes:
     `/v1/completions` schema returned by vLLM:
       request payload: {"prompt": ..., ...generation_params}
       response: {"choices": [{"text": ..., "finish_reason": ...}, ...]}
-  - We write `mode` as list[str] (hints only) to match the existing diagnosis loader.
+  - We write `mode` as list[str] (hints only) OR list[dict] with {"hint": str, "solution": str}.
+    The diagnosis loader (`verl/diagnosis/data.py`) will still extract reachable hints.
   - By default, we DO NOT overwrite the input parquet. Instead, we write to a new file
     with suffix `.with_mode.parquet` (to avoid clobbering data on slow network filesystems).
     Use `--inplace` to overwrite input explicitly.
@@ -38,6 +39,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -69,25 +71,17 @@ INSTRUCTION_PROMPT = (
     "- Every mode must arrive at the SAME final answer. If you find inconsistency, fix it internally and output only consistent modes.\n"
     "- Put the final answer in \\boxed{...} at the end of EACH mode's solution (e.g., \"Final: \\boxed{42}\").\n"
     "- Do not add any extra commentary outside the requested output format.\n\n"
-    "Output format (STRICT JSON only; no markdown, no extra text):\n"
-    "Return a JSON array. Each element corresponds to one problem:\n"
-    "[\n"
-    "  {\n"
-    "    \"problem\": \"<original problem text>\",\n"
-    "    \"modes\": [\n"
-    "      {\n"
-    "        \"hint\": \"<short hint>\",\n"
-    "        \"solution\": \"<concise solution ending with Final: \\\\boxed{...}>\"\n"
-    "      },\n"
-    "      ...\n"
-    "    ]\n"
-    "  },\n"
-    "  ...\n"
-    "]\n\n"
-    "Now generate the modes for the following problems:\n"
-    "<PROBLEMS>\n"
+    "Output format (plain text; no markdown):\n"
+    "For each mode i, output EXACTLY the following tags (case-insensitive):\n"
+    "[MODE i]\n"
+    "[HINT] <one sentence>\n"
+    "[SOLUTION] <concise solution ending with Final: \\boxed{...}>\n"
+    "Separate modes with a blank line.\n"
+    "Do NOT output anything else.\n\n"
+    "Now generate the modes for the following problem:\n"
+    "<PROBLEM>\n"
     "{problems}\n"
-    "</PROBLEMS>\n"
+    "</PROBLEM>\n"
 )
 
 
@@ -348,10 +342,158 @@ def _extract_json_array(text: str) -> List[Any]:
     raise ValueError("response is not a JSON array")
 
 
-def _hints_from_modes(obj: Any) -> List[str]:
-    """Extract list[str] hints from the model JSON output."""
+_TAG_RE = re.compile(r"\[\s*(mode\b[^\]]*|hint|solution)\s*\]", flags=re.IGNORECASE)
+
+
+def _clean_block_text(s: str) -> str:
+    s = (s or "").strip()
+    # Trim common punctuation artifacts after tags.
+    s = re.sub(r"^\s*[:\-–—]+\s*", "", s)
+    return s.strip()
+
+
+def _extract_tagged_modes(text: str) -> List[Dict[str, str]]:
+    """Extract modes from a plain-text tagged format.
+
+    Expected tags per mode:
+      [HINT] ...
+      [SOLUTION] ...
+
+    Returns canonical modes: list[{"hint": str, "solution": str}].
+    """
+    t = (text or "").strip()
+    if not t:
+        raise ValueError("empty response")
+
+    tokens = list(_TAG_RE.finditer(t))
+    if not tokens:
+        raise ValueError("no tagged blocks")
+
+    def _typ(m: re.Match[str]) -> str:
+        g = (m.group(1) or "").strip().lower()
+        return "mode" if g.startswith("mode") else g
+
+    modes: List[Dict[str, str]] = []
+    idx = 0
+    n = len(tokens)
+    while idx < n:
+        # Find next [HINT]
+        while idx < n and _typ(tokens[idx]) != "hint":
+            idx += 1
+        if idx >= n:
+            break
+        hint_end = tokens[idx].end()
+
+        # Find next [SOLUTION]
+        j = idx + 1
+        while j < n and _typ(tokens[j]) != "solution":
+            j += 1
+        if j >= n:
+            break
+        hint_text = _clean_block_text(t[hint_end : tokens[j].start()])
+
+        sol_end = tokens[j].end()
+
+        # Solution continues until next [HINT] or [MODE] (or end).
+        k = j + 1
+        while k < n and _typ(tokens[k]) not in ("hint", "mode"):
+            k += 1
+        sol_text = _clean_block_text(t[sol_end : (tokens[k].start() if k < n else len(t))])
+
+        if hint_text and sol_text:
+            modes.append({"hint": hint_text, "solution": sol_text})
+
+        idx = k
+
+    # Stable dedupe by hint, preserve order.
+    seen = set()
+    out: List[Dict[str, str]] = []
+    for m in modes:
+        h = (m.get("hint") or "").strip()
+        if not h or h in seen:
+            continue
+        seen.add(h)
+        out.append({"hint": h, "solution": (m.get("solution") or "").strip()})
+
+    if len(out) < 2:
+        raise ValueError("parsed <2 modes from tagged blocks")
+    return out[:5]
+
+
+def _modes_from_json(obj: Any) -> List[Dict[str, str]]:
+    """Extract canonical modes from the legacy JSON output."""
     if not isinstance(obj, list) or not obj:
         return []
+
+    rec = obj[0]
+    if not isinstance(rec, dict):
+        return []
+    modes = rec.get("modes")
+    if not isinstance(modes, list):
+        return []
+
+    out: List[Dict[str, str]] = []
+    for m in modes:
+        if not isinstance(m, dict):
+            continue
+        h = m.get("hint")
+        s = m.get("solution")
+        if h is None or s is None:
+            continue
+        hh = str(h).strip()
+        ss = str(s).strip()
+        if not hh or not ss:
+            continue
+        out.append({"hint": hh, "solution": ss})
+    return out
+
+
+def _extract_modes(text: str) -> List[Dict[str, str]]:
+    """Extract canonical modes from model output.
+
+    We first try legacy JSON (if the model happens to follow it), otherwise
+    fallback to tagged plain-text parsing.
+    """
+    try:
+        arr = _extract_json_array(text)
+        modes = _modes_from_json(arr)
+        if modes:
+            return modes
+    except Exception:
+        pass
+    return _extract_tagged_modes(text)
+
+
+def _hints_from_modes(obj: Any) -> List[str]:
+    """Extract list[str] hints from model output.
+
+    Supports:
+      - legacy JSON output (top-level list with {"modes": [...]})
+      - canonical modes list: list[{"hint": ..., "solution": ...}]
+    """
+    if not isinstance(obj, list) or not obj:
+        return []
+
+    # Canonical form: list[{"hint": ..., "solution": ...}]
+    if isinstance(obj[0], dict) and ("modes" not in obj[0]) and ("hint" in obj[0] or "solution" in obj[0]):
+        hints: List[str] = []
+        for m in obj:
+            if not isinstance(m, dict):
+                continue
+            h = m.get("hint")
+            if h is None:
+                continue
+            h = str(h).strip()
+            if h:
+                hints.append(h)
+        seen = set()
+        out: List[str] = []
+        for h in hints:
+            if h in seen:
+                continue
+            seen.add(h)
+            out.append(h)
+        return out
 
     # We call one problem per request; take the first element.
     rec = obj[0]
@@ -423,9 +565,30 @@ def _ground_truth_from_row(df: "pd.DataFrame", i: int) -> Optional[str]:
 
 
 def _boxed_answers_from_modes(obj: Any) -> List[str]:
-    """Extract boxed answers from each mode's solution in the model JSON output."""
+    """Extract boxed answers from each mode's solution.
+
+    Supports:
+      - legacy JSON output (top-level list with {"modes": [...]})
+      - canonical modes list: list[{"hint": ..., "solution": ...}]
+    """
     if not isinstance(obj, list) or not obj:
         return []
+
+    # Canonical form: list[{"hint": ..., "solution": ...}]
+    if isinstance(obj[0], dict) and ("modes" not in obj[0]) and ("solution" in obj[0] or "hint" in obj[0]):
+        answers: List[str] = []
+        for m in obj:
+            if not isinstance(m, dict):
+                continue
+            sol = m.get("solution")
+            if sol is None:
+                continue
+            ans = extract_final_answer(str(sol), method="boxed", boxed_cmd="\\boxed")
+            if ans is None:
+                continue
+            answers.append(str(ans).strip())
+        return answers
+
     rec = obj[0]
     if not isinstance(rec, dict):
         return []
@@ -459,6 +622,17 @@ def _verify_modes_match_ground_truth(obj: Any, ground_truth: str) -> Tuple[bool,
     answers = _boxed_answers_from_modes(obj)
     if not answers:
         return False, "no_boxed"
+
+    # If we are in canonical mode list form, require every mode to include a boxed answer.
+    if (
+        isinstance(obj, list)
+        and obj
+        and isinstance(obj[0], dict)
+        and ("modes" not in obj[0])
+        and ("solution" in obj[0] or "hint" in obj[0])
+        and len(answers) != len(obj)
+    ):
+        return False, f"missing_boxed: {len(answers)}/{len(obj)}"
 
     # Require all extracted answers to be identical (exact_match after normalization).
     base = answers[0]
@@ -573,7 +747,7 @@ def main() -> None:
         type=str,
         default=None,
         help=(
-            "Output parquet path. Default: write to a new file with suffix '\.with_mode.parquet' "
+            "Output parquet path. Default: write to a new file with suffix '.with_mode.parquet' "
             "(does NOT overwrite input)."
         ),
     )
@@ -603,6 +777,13 @@ def main() -> None:
         type=float,
         default=0.0,
         help="Optional sleep seconds between API calls to avoid rate limits.",
+    )
+
+    ap.add_argument(
+        "--modes_jsonl_path",
+        type=str,
+        default=None,
+        help="Optional: write extracted (prompt, hint, solution) records as JSONL for inspection.",
     )
 
     # Primus API config.
@@ -733,6 +914,14 @@ def main() -> None:
     n_skip = 0
     n_fail = 0
 
+    jsonl_f = None
+    if args.modes_jsonl_path:
+        p = str(args.modes_jsonl_path)
+        d = os.path.dirname(p)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        jsonl_f = open(p, "w", encoding="utf-8")
+
     for i in range(n_total):
         v = df.at[i, "mode"] if "mode" in df.columns else None
         if only_missing and _has_mode(v):
@@ -752,20 +941,31 @@ def main() -> None:
 
         try:
             content = client.complete(messages)
-            arr = _extract_json_array(content)
+            modes = _extract_modes(content)
 
             gt = _ground_truth_from_row(df, i)
             if gt is None:
                 raise ValueError("missing reward_model.ground_truth for verification")
 
-            ok, detail = _verify_modes_match_ground_truth(arr, gt)
+            ok, detail = _verify_modes_match_ground_truth(modes, gt)
             if not ok:
                 raise ValueError(f"ground_truth verify failed: {detail}")
 
-            hints = _hints_from_modes(arr)
-            if not hints:
-                raise ValueError("parsed 0 hints")
-            df.at[i, "mode"] = hints
+            if not modes:
+                raise ValueError("parsed 0 modes")
+            df.at[i, "mode"] = modes
+
+            # Optional JSONL dump for debugging/inspection.
+            if jsonl_f is not None:
+                for m in modes:
+                    rec = {
+                        "idx": int(i),
+                        "prompt": problem_text,
+                        "hint": str(m.get("hint", "")),
+                        "solution": str(m.get("solution", "")),
+                        "ground_truth": str(gt),
+                    }
+                    jsonl_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             n_done += 1
         except Exception as e:
             n_fail += 1
@@ -786,6 +986,8 @@ def main() -> None:
     df.to_parquet(tmp_path, index=False)
     os.replace(tmp_path, out_path)
     _wait_until_parquet_readable(out_path)
+    if jsonl_f is not None:
+        jsonl_f.close()
     print(f"[mode_hints] done. wrote={n_done} skipped={n_skip} failed={n_fail} -> {out_path}")
 
 
